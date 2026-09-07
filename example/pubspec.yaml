@@ -14,6 +14,12 @@ dependencies:
   mt_llmkit:
     path: ../
 
+  # Links llama.cpp's Apple XCFramework through SwiftPM. Without it llamadart falls
+  # back to bundling its dylib as a native asset, which Flutter then wraps in a
+  # framework whose Info.plist declares a wrong MinimumOSVersion (ITMS-90208).
+  # Must be declared by the *app*: llamadart's build hook reads the app's pubspec.
+  llamadart_llama_cpp_flutter: ^0.0.17
+
   cupertino_icons: ^1.0.8
 
   file_picker: ^8.1.2

@@ -1,7 +1,7 @@
 # mt_llmkit
 
-![Flutter](https://img.shields.io/badge/Flutter-%3E%3D3.32-02569B?logo=flutter)
-![Dart](https://img.shields.io/badge/Dart-%5E3.8-0175C2?logo=dart)
+![Flutter](https://img.shields.io/badge/Flutter-%3E%3D3.38-02569B?logo=flutter)
+![Dart](https://img.shields.io/badge/Dart-%3E%3D3.10.7-0175C2?logo=dart)
 ![Platform](https://img.shields.io/badge/platform-iOS%20%7C%20Android-lightgrey)
 ![Stability](https://img.shields.io/badge/stability-beta-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -13,6 +13,8 @@ A Flutter plugin for running Large Language Models (LLMs) locally on Android and
 ## Table of Contents
 
 1. [Installation](#installation)
+   - [Platform requirements](#platform-requirements)
+   - [iOS setup](#ios-setup)
 2. [Local LLM Inference (GGUF)](#local-llm-inference-gguf)
    - [Quick start](#quick-start)
    - [Backends](#backends)
@@ -49,6 +51,10 @@ Add to your `pubspec.yaml`:
 ```yaml
 dependencies:
   mt_llmkit: ^0.0.1-beta.1
+
+  # iOS/macOS only: links llama.cpp's Apple XCFramework through Swift Package Manager.
+  # Must be declared here, in the *app's* pubspec — llamadart's build hook reads it.
+  llamadart_llama_cpp_flutter: ^0.0.17
 ```
 
 Then run:
@@ -60,7 +66,51 @@ flutter pub get
 Import the library:
 
 ```dart
-import 'package:mt_llmkit/llmcpp.dart';
+import 'package:mt_llmkit/mt_llmkit.dart';
+```
+
+### Platform requirements
+
+| | Minimum |
+|---|---|
+| iOS | **16.4** (`IPHONEOS_DEPLOYMENT_TARGET`, and `platform :ios, '16.4'` if you use CocoaPods) |
+| Flutter | **3.38.0** (required by llamadart 0.8.x) |
+| Android | arm64-v8a or x86_64 |
+
+The iOS floor comes from llamadart's prebuilt llama.cpp runtime, which is built for iOS 16.4.
+`ios/mt_llmkit.podspec` and `ios/mt_llmkit/Package.swift` both declare it, so the incompatibility
+is reported at integration time rather than at runtime.
+
+### iOS setup
+
+On iOS the native runtime is linked as an XCFramework through **Swift Package Manager**, which is
+enabled by default in Flutter 3.38+. Two things are required in your app:
+
+1. `llamadart_llama_cpp_flutter` in the app's `pubspec.yaml` (see above).
+2. Swift Package Manager **not** disabled — i.e. no
+   `flutter: config: enable-swift-package-manager: false` in the app's `pubspec.yaml`.
+   CocoaPods can stay: apps mixing SwiftPM packages with pods (Firebase and friends) are supported.
+
+If either is missing, llamadart falls back to shipping its dylib as a Flutter *native asset*.
+Flutter then wraps it in a framework whose `Info.plist` declares a hardcoded
+`MinimumOSVersion` of `13.0` ([flutter/flutter#145104](https://github.com/flutter/flutter/issues/145104))
+while the binary requires 16.4, and App Store validation rejects the upload:
+
+```
+ITMS-90208: Invalid Bundle - The bundle Runner.app/Frameworks/llamadart.framework
+does not support the minimum OS Version specified in the Info.plist.
+```
+
+When migrating an existing app, run `flutter clean` first. Flutter does not prune
+`Runner.app/Frameworks`, so a stale `llamadart.framework` from an earlier build stays in the bundle
+— and would be uploaded — even though the new build no longer produces one.
+
+You can confirm a correct setup on a release build — there must be **no** `llamadart.framework`:
+
+```bash
+ls build/ios/iphoneos/Runner.app/Frameworks
+# App.framework  Flutter.framework  llama.framework
+# llamadart-llama-cpp-flutter.framework  objective_c.framework
 ```
 
 ---

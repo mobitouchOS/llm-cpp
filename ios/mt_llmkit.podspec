@@ -1,6 +1,6 @@
 #
 # To learn more about a Podspec see http://guides.cocoapods.org/syntax/podspec.html.
-# Run `pod lib lint llmcpp.podspec` to validate before publishing.
+# Run `pod lib lint mt_llmkit.podspec` to validate before publishing.
 #
 Pod::Spec.new do |s|
   s.name             = 'mt_llmkit'
@@ -13,17 +13,22 @@ mt_llmkit enables running Large Language Models locally on iOS using llama.cpp. 
   s.license          = { :file => '../LICENSE' }
   s.author           = { 'Mobitouch' => 'mobitouch.net@gmail.com' }
   s.source           = { :path => '.' }
-  s.source_files = 'Classes/**/*'
+  # Shared with the Swift Package Manager layout in ios/mt_llmkit/.
+  s.source_files = 'mt_llmkit/Sources/mt_llmkit/**/*.swift'
   s.dependency 'Flutter'
+  # Deliberate guard: the prebuilt `libllamadart.dylib` that llamadart bundles as a
+  # native asset is built with `minos 16.4`, so an app with a lower deployment target
+  # would ship a framework it cannot load. CocoaPods rejects the integration instead.
   s.platform = :ios, '16.4'
 
   # Flutter.framework does not contain a i386 slice.
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES', 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386' }
   s.swift_version = '5.0'
 
-  # If your plugin requires a privacy manifest, for example if it uses any
-  # required reason APIs, update the PrivacyInfo.xcprivacy file to describe your
-  # plugin's privacy impact, and then uncomment this line. For more information,
-  # see https://developer.apple.com/documentation/bundleresources/privacy_manifest_files
-  # s.resource_bundles = {'llmcpp_privacy' => ['Resources/PrivacyInfo.xcprivacy']}
+  # Privacy manifest — the Swift Package Manager equivalent is `resources:` in
+  # ios/mt_llmkit/Package.swift. See
+  # https://developer.apple.com/documentation/bundleresources/privacy_manifest_files
+  s.resource_bundles = {
+    'mt_llmkit_privacy' => ['mt_llmkit/Sources/mt_llmkit/Resources/PrivacyInfo.xcprivacy']
+  }
 end

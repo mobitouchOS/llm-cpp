@@ -118,6 +118,7 @@ class _LlmDemoPageState extends State<LlmDemoPage> {
 
   static const _modelUrl =
       'https://huggingface.co/unsloth/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf';
+  // 'https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf';
 
   @override
   void initState() {
@@ -206,8 +207,17 @@ class _LlmDemoPageState extends State<LlmDemoPage> {
         backend: ModelBackend.inProcess,
         config: LlmConfig(
           // topP: 0.1,
-          temp: 0.7,
-          nPredict: 120,
+          // temp: 0.3,
+          temp: 0,
+          topK: 1,
+          topP: 1,
+          penaltyRepeat: 1.0,
+          //
+          nPredict: 2048,
+          nCtx: 2048,
+          gpuBackend: GpuBackend.cpu,
+          nGpuLayers: 0,
+          nBatch: 512,
           // nBatch: 128,
           nThreads: 6,
           // nCtx: 1024,

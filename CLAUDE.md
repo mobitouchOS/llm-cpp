@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**mt_llmkit** is a Flutter plugin that enables running Large Language Models (LLMs) locally on Android and iOS using [llamadart](https://pub.dev/packages/llamadart) (`0.6.10`). It provides real-time streaming inference, performance metrics, cloud AI chat providers, and a fully local RAG pipeline.
+**mt_llmkit** is a Flutter plugin that enables running Large Language Models (LLMs) locally on Android and iOS using [llamadart](https://pub.dev/packages/llamadart) (`^0.8.22`). It provides real-time streaming inference, performance metrics, cloud AI chat providers, and a fully local RAG pipeline.
+
+Requires Flutter `>=3.38.0` (llamadart 0.8.x) and iOS `16.4`+.
 
 ## Commands
 
@@ -35,7 +37,7 @@ cd example && flutter pub get && flutter run
 
 ### Public API
 
-`lib/llmcpp.dart` is the single export file. It re-exports everything from `src/` plus `LlamaImageContent`, `LlamaTextContent`, `LlamaContentPart`, `GpuBackend`, `LoraAdapterConfig`, `GenerationGrammarTrigger` from `llamadart`.
+`lib/mt_llmkit.dart` is the single export file. It re-exports everything from `src/` plus `LlamaImageContent`, `LlamaTextContent`, `LlamaContentPart`, `GpuBackend`, `LoraAdapterConfig`, `GenerationGrammarTrigger` from `llamadart`.
 
 ### Class Hierarchy
 
@@ -106,9 +108,31 @@ Use `AIChatProviderFactory.create(AIChatProviderType)` to instantiate. Exception
 
 ### Native Libraries
 
-- Android: pre-compiled `.so` files in `android/src/main/jniLibs/{arm64-v8a,x86_64}/`
-- iOS: native frameworks via CocoaPods (`ios/llmcpp.podspec`)
-- Loading managed transparently by `llamadart` via Dart Build Hooks
+- Android: `.so` files downloaded and bundled by llamadart's Dart build hook (this repo ships no
+  `jniLibs`); ABIs limited to `arm64-v8a` and `x86_64` in `android/build.gradle`
+- iOS: llama.cpp XCFramework linked through **Swift Package Manager** by the companion package
+  `llamadart_llama_cpp_flutter`, which the **app** must declare in its own `pubspec.yaml`
+  (llamadart's `hook/build.dart` reads the consumer pubspec and then emits its asset as
+  `LookupInProcess()` instead of a bundled dylib)
+- Without that companion package llamadart falls back to native assets, and Flutter wraps the
+  dylib in a `llamadart.framework` whose `Info.plist` hardcodes `MinimumOSVersion 13.0`
+  (flutter/flutter#145104) while the binary needs 16.4 → App Store rejects with **ITMS-90208**.
+  A correct release build contains **no** `llamadart.framework`, only `llama.framework` +
+  `llamadart-llama-cpp-flutter.framework`. Verify only after `flutter clean` — Flutter never prunes
+  `Runner.app/Frameworks`, so a stale `llamadart.framework` from a pre-migration build survives
+  incremental builds and would still be shipped.
+
+### iOS plugin packaging
+
+Dual: Swift Package Manager (`ios/mt_llmkit/Package.swift`, product `mt-llmkit`) **and** CocoaPods
+(`ios/mt_llmkit.podspec`) over the same sources in `ios/mt_llmkit/Sources/mt_llmkit/`. Both declare
+iOS 16.4.
+
+Gotcha: for the **example app** Flutter adds the plugin as a local SwiftPM package override, and
+the override identity is the basename of the plugin's root directory. The checkout directory must
+therefore be named `mt_llmkit`; from a directory named otherwise, `flutter build ios` fails with
+`unable to override package 'mt_llmkit' because its identity '<dir>' doesn't match override's
+identity (directory name) 'mt_llmkit'`. Consuming apps are unaffected (no override is added).
 
 ## Test Infrastructure
 

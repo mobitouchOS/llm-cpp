@@ -13,7 +13,7 @@ topics:
 
 environment:
   sdk: '>=3.10.7 <4.0.0'
-  flutter: '>=3.3.0'
+  flutter: '>=3.38.0'
 
 dependencies:
   flutter:
@@ -22,7 +22,7 @@ dependencies:
     sdk: flutter
   web: ^1.0.0
   plugin_platform_interface: ^2.0.2
-  llamadart: ^0.6.10
+  llamadart: ^0.8.22
   http: ^1.2.0
 
 

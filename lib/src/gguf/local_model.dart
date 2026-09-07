@@ -3,6 +3,7 @@
 import 'package:llamadart/llamadart.dart' show LlamaContentPart;
 
 import '../core/generation_overrides.dart';
+import '../core/generation_result.dart';
 import '../core/llm_config.dart';
 import '../core/llm_interface.dart';
 import '../core/model_diagnostics.dart';
@@ -108,6 +109,27 @@ class LocalModel implements LlmInterface {
   }) {
     _ensureInitialized();
     return _model!.sendPromptStream(
+      prompt,
+      systemPrompt: systemPrompt,
+      attachments: attachments,
+      overrides: overrides,
+    );
+  }
+
+  /// Runs one generation and returns everything it produced — answer text,
+  /// reasoning, tool calls, why it stopped and metrics.
+  ///
+  /// Prefer this over [sendPromptComplete] on a reasoning model: that returns
+  /// only the text, throwing away reasoning the model just spent decode time
+  /// producing.
+  Future<GenerationResult> sendPromptResult(
+    String prompt, {
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
+  }) {
+    _ensureInitialized();
+    return _model!.sendPromptResult(
       prompt,
       systemPrompt: systemPrompt,
       attachments: attachments,

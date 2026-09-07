@@ -4,6 +4,9 @@ import 'package:mt_llmkit/src/models/llm_model_base.dart';
 
 /// Mock implementation for testing purposes
 class MockLlmModel extends LlmModelBase {
+  @override
+  final LlmConfig config = const LlmConfig();
+
   bool _loadModelCalled = false;
   bool _sendPromptCalled = false;
   bool _disposeCalled = false;

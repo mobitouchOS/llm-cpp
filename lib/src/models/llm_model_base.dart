@@ -4,11 +4,16 @@ import 'package:flutter/foundation.dart';
 import 'package:llamadart/llamadart.dart' show LlamaContentPart;
 
 import '../core/generation_overrides.dart';
+import '../core/generation_result.dart';
+import '../core/llm_config.dart';
 import '../core/llm_interface.dart';
 import '../core/model_diagnostics.dart';
 import '../core/structured_output.dart';
 
 abstract class LlmModelBase implements LlmInterface {
+  /// Configuration this model was built with.
+  LlmConfig get config;
+
   // ── Lifecycle ────────────────────────────────────────────────────────────
 
   /// Frees the model and its context but keeps the backend — and, for the
@@ -24,6 +29,70 @@ abstract class LlmModelBase implements LlmInterface {
   /// memory and the cached prompt tokens before ingesting its prompt —
   /// nothing is recomputed until then, so calling this is free.
   Future<void> clean({bool resetConversations = true});
+
+  // ── Generation ───────────────────────────────────────────────────────────
+
+  /// Runs one generation and returns everything it produced — answer text,
+  /// reasoning, tool calls and why it stopped.
+  ///
+  /// [sendPromptComplete] returns only the text, which throws away the
+  /// reasoning a thinking model just spent decode time on.
+  Future<GenerationResult> sendPromptResult(
+    String prompt, {
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
+  }) async {
+    final text = StringBuffer();
+    final thinking = StringBuffer();
+    var result = const GenerationResult(text: '');
+
+    await for (final chunk in sendPromptStream(
+      prompt,
+      systemPrompt: systemPrompt,
+      attachments: attachments,
+      overrides: overrides,
+    )) {
+      text.write(chunk.text);
+      if (chunk.thinking != null) thinking.write(chunk.thinking);
+      if (chunk.isFinal) {
+        result = GenerationResult(
+          text: '',
+          toolCalls: chunk.toolCalls,
+          finishReason: chunk.finishReason,
+          metrics: chunk.metrics,
+        );
+      }
+    }
+
+    final reasoning = thinking.isEmpty ? null : thinking.toString();
+    final budget = overrides?.thinkingBudget ?? config.thinkingBudget;
+    int? thinkingTokens;
+    var truncated = false;
+
+    if (budget != null && reasoning != null) {
+      final forced = budget.forcedMessage;
+      if (forced != null && forced.isNotEmpty) {
+        // Exact: llamadart appends this text before forcing the closing tag.
+        truncated = reasoning.trimRight().endsWith(forced);
+      } else {
+        // Inferred: the budget is enforced by a native sampler that reports
+        // nothing back to Dart, so reaching the limit is all we can observe.
+        thinkingTokens = await countTokens(reasoning);
+        truncated = thinkingTokens >= budget.maxTokens;
+      }
+    }
+
+    return GenerationResult(
+      text: text.toString(),
+      thinking: reasoning,
+      toolCalls: result.toolCalls,
+      finishReason: result.finishReason,
+      metrics: result.metrics,
+      thinkingTruncated: truncated,
+      thinkingTokens: thinkingTokens,
+    );
+  }
 
   // ── Structured output ────────────────────────────────────────────────────
 

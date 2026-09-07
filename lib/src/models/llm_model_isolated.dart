@@ -228,6 +228,7 @@ Future<void> _llamaIsolateWorkerMain(Map<String, dynamic> args) async {
 // ── LlmModelIsolated ───────────────────────────────────────────────────────
 
 class LlmModelIsolated extends LlmModelBase {
+  @override
   final LlmConfig config;
   Isolate? _isolate;
   SendPort? _workerPort;

@@ -43,6 +43,7 @@ export 'src/api/openai_chat_provider.dart';
 
 // ── Core ─────────────────────────────────────────────────────────────────────
 export 'src/core/generation_overrides.dart';
+export 'src/core/generation_result.dart';
 export 'src/core/llm_config.dart';
 export 'src/core/llm_interface.dart';
 export 'src/core/model_diagnostics.dart';

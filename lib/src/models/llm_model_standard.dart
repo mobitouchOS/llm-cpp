@@ -16,6 +16,7 @@ import '../core/tools.dart';
 import 'llm_model_base.dart';
 
 class LlmModelStandard extends LlmModelBase {
+  @override
   final LlmConfig config;
   LlamaEngine? _engine;
 
@@ -201,22 +202,36 @@ class LlmModelStandard extends LlmModelBase {
         final deltas = choice?.delta.toolCalls;
         if (deltas != null) toolCalls.add(deltas);
 
+        // Text and reasoning are emitted as separate chunks, matching the
+        // isolate backend, so a chunk carries one channel or the other.
         final text = choice?.delta.content;
+        if (text != null) {
+          totalTokenCount += 1;
+          yield StreamingChunk(
+            text: text,
+            metrics: PerformanceMetrics.fromGeneration(
+              tokenCount: totalTokenCount,
+              startTime: startTime,
+              endTime: DateTime.now(),
+            ),
+            isFinal: false,
+          );
+        }
+
         final thinking = choice?.delta.thinking;
-        if (text == null && thinking == null) continue;
-
-        totalTokenCount += 1;
-
-        yield StreamingChunk(
-          text: text ?? '',
-          thinking: thinking,
-          metrics: PerformanceMetrics.fromGeneration(
-            tokenCount: totalTokenCount,
-            startTime: startTime,
-            endTime: DateTime.now(),
-          ),
-          isFinal: false,
-        );
+        if (thinking != null) {
+          totalTokenCount += 1;
+          yield StreamingChunk(
+            text: '',
+            thinking: thinking,
+            metrics: PerformanceMetrics.fromGeneration(
+              tokenCount: totalTokenCount,
+              startTime: startTime,
+              endTime: DateTime.now(),
+            ),
+            isFinal: false,
+          );
+        }
       }
 
       yield StreamingChunk(

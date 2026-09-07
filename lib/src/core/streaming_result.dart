@@ -11,8 +11,9 @@ class StreamingChunk {
   /// Reasoning text, for models that emit a thinking block.
   ///
   /// llamadart routes reasoning to its own channel, so it never appears in
-  /// [text]. A chunk carries one or the other. Set `enableThinking: false` in
-  /// [LlmConfig] to stop paying decode time for reasoning you do not show.
+  /// [text], and both backends emit it as its own chunk — a chunk carries one
+  /// channel or the other. Set `enableThinking: false` in [LlmConfig] to stop
+  /// paying decode time for reasoning you do not show.
   final String? thinking;
 
   /// Current performance metrics (calculated so far)

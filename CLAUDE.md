@@ -135,6 +135,23 @@ cannot (and should not) execute there. Completed calls arrive as data on
 fragments, and `ToolCallAccumulator` (`lib/src/core/tools.dart`) reassembles them so callers do
 not have to.
 
+### Reasoning (thinking)
+
+`enableThinking` is on by default in llamadart. Reasoning arrives on `StreamingChunk.thinking`,
+never mixed into `text`, and both backends emit it as its own chunk. `sendPromptComplete` returns
+only the answer text; use `sendPromptResult` when the reasoning matters.
+
+`LlmConfig.thinkingBudget` caps tokens per reasoning block. **llamadart reports nothing when that
+budget is hit** — it is enforced by a native sampler that forces the closing tag, with no event,
+flag or distinct finish reason reaching Dart. `GenerationResult.thinkingTruncated` is therefore
+derived: exact when `ThinkingBudget.forcedMessage` is set (the forced text either terminates the
+reasoning or it does not), and otherwise inferred from `thinkingTokens` reaching the budget,
+which a model that stops right at the limit would also trigger. Set `forcedMessage` when the flag
+has to be trusted.
+
+Note: `thinkingBudget` with any image or audio attachment throws `LlamaUnsupportedException` —
+the reasoning sampler is text-only.
+
 ### Structured output
 
 `LlmStructuredOutput<T>` (`lib/src/core/structured_output.dart`) wraps llamadart's builder:

@@ -2,6 +2,9 @@
 
 ### Fixed
 
+- The in-process backend now emits reasoning as its own chunk, matching the isolate backend and
+  `StreamingChunk.thinking`'s documented contract. It used to put text and reasoning on the same
+  chunk.
 - `clean()` does something. It was a no-op documented as "create() is stateless in llamadart —
   no context to reset", which is false: `reusePromptPrefix` defaults to `true` and llamadart
   deliberately reuses a matching KV prompt prefix across calls. It now drops that prefix (the
@@ -30,6 +33,13 @@
   llama.cpp backend alive, so the next `loadModel` skips isolate spawn and backend
   initialization. `LocalModel.loadModel` now swaps the model inside the live worker instead of
   tearing it down and respawning — switching models was the expensive path.
+- **`sendPromptResult`** returns everything a generation produced —
+  `GenerationResult{text, thinking, toolCalls, finishReason, metrics, thinkingTruncated,
+  thinkingTokens}`. `sendPromptComplete` returns only the text, so on a reasoning model it
+  silently discards output the model just spent decode time on. `thinkingTruncated` says whether
+  a `thinkingBudget` cut the reasoning short: llamadart reports nothing about that (the budget is
+  a native sampler), so it is exact only when `ThinkingBudget.forcedMessage` is set and inferred
+  from a token count otherwise — the API says which.
 - **Typed structured output.** `LlmStructuredOutput<T>` (`jsonObject`, `jsonSchema`,
   `jsonValueSchema`) plus `LocalModel.sendPromptStructured` and a `parseStructured` extension on
   any `Stream<StreamingChunk>`. The schema constrains decoding, so the model cannot emit

@@ -20,6 +20,8 @@ mechaniczne, plus jeden realny bloker infrastrukturalny (SwiftPM).
 | Pakiet | `package:llmcpp/llmcpp.dart` | `package:mt_llmkit/mt_llmkit.dart` |
 | `dispose()` | `void` | `Future<void>`, **musi być awaitowane** |
 | `RagEngine.dispose()` | `void` | `Future<void>` |
+| `clean()` | no-op; `UnsupportedError` na backendzie isolate | `Future<void> clean({resetConversations})`, działa na obu backendach; poza `LlmInterface` |
+| Zwolnienie modelu | tylko `dispose()` (ubija worker isolate) | dodatkowo `unload()` — zwalnia model, zostawia worker i backend |
 | Załączniki w `sendPrompt*` | `images: List<LlamaImageContent>` | `attachments: List<LlamaContentPart>` |
 | System prompt | brak | `sendPrompt*(…, systemPrompt: …)` |
 | Domyślne `nGpuLayers`/`nBatch`/`nThreads` | 64 / 4096 / 6 | auto llamadart |
@@ -95,11 +97,31 @@ Cztery miejsca:
   → `Future<void> dispose() async => _ragEngine?.dispose();`
 - Wywołujący te `dispose()` (m.in. `model_lifecycle_service.dart`) — dodać `await`.
 
-**Bonus:** `_isolateTeardownGrace` (150 ms `Future.delayed` po `_model.dispose()`,
+**Bonus 1:** `_isolateTeardownGrace` (150 ms `Future.delayed` po `_model.dispose()`,
 `llm_local_datasource.dart:223`) można usunąć. Obchodził dokładnie ten wyścig, który
 `mt_llmkit` zamyka teraz handshakiem z workerem — plugin czeka na potwierdzenie, że llama.cpp
 zwolnił natywne uchwyty, zanim zabije isolate. Usuń dopiero po smoke-teście dwukrotnej zmiany
 modelu pod rząd (patrz checklista, pkt 7).
+
+**Bonus 2 — `resetContext()` przestaje być drogie.**
+`llm_local_datasource.dart:254` czyści KV cache przez **pełne przeładowanie modelu**
+(`initialize(path, …)` z tymi samymi parametrami). To sekundy i ponowne wczytanie wielogigabajtowego
+pliku, żeby zapomnieć cache. `LocalModel.clean()` robi dokładnie to zadanie za darmo: podnosi flagę,
+a następna generacja idzie z `reusePromptPrefix: false`, co czyści pamięć kontekstu i cache tokenów
+tuż przed ingestią promptu. Nic nie jest przeliczane w międzyczasie.
+
+```dart
+Future<void> resetContext() async {
+  if (_activeModelPath == null) return;
+  await _model.clean();
+}
+```
+
+**Bonus 3 — przełączanie modeli bez respawnu.** `LocalModel.loadModel` sam robi teraz `unload()`
+na żywym workerze, więc zmiana modelu w ustawieniach (`ai_model_notifier.dart`,
+`model_lifecycle_service.dart`) nie ubija isolate ani nie inicjalizuje llama.cpp od zera. Jeśli
+gdzieś trzeba tylko zwolnić pamięć bez zmiany modelu — `await model.unload()` zamiast pełnego
+`dispose()`.
 
 ### 3.4 Regeneracja i weryfikacja
 
@@ -156,9 +178,9 @@ medvalt ręcznie składa prompty ChatML / Llama-3 / Gemma (`PromptFormat` w
 regresją migracji — ale 0.8.x dołożyło nowy renderer szablonów, parser PEG i
 `thinkingForcedOpen`, więc to miejsce numer jeden do smoke-testu.
 
-Docelowo warto to uprościć: `mt_llmkit` ma teraz `systemPrompt`, więc instrukcje systemowe
-mogą iść osobnym kanałem zamiast być wklejane w ręcznie budowany prompt. To osobne zadanie,
-nie część migracji.
+Docelowo warto to uprościć: `mt_llmkit` ma teraz `systemPrompt`, a nawet całe
+`Conversation` (patrz 5.6), więc ręczne składanie ChatML/Llama-3/Gemma może zniknąć. To osobne
+zadanie, nie część migracji.
 
 ### 5.2 Reasoning
 
@@ -167,7 +189,8 @@ Modele, których blok `<think>` wcześniej wyciekał do `delta.content`, w 0.8.x
 Dwie możliwości do wykorzystania:
 
 - `chunk.thinking` można podpiąć pod istniejący label „myślenia” w UI
-  (commit `96a6950`) zamiast heurystyki na czasie.
+  (commit `96a6950`) zamiast heurystyki na czasie. `sendPromptResult` zwraca reasoning razem
+  z odpowiedzią, jeśli wygodniej nie strumieniowo.
 - `LlmConfig.enableThinking: false` (albo `thinkingBudget`) zastępuje sufiks `/no_think`
   z `chat_notifier.dart:635` — działa niezależnie od tego, czy model rozumie `/no_think`.
 
@@ -175,7 +198,7 @@ Dwie możliwości do wykorzystania:
 
 `chunk.isTruncated` / `chunk.finishReason` mówi wprost, czy generacja skończyła się czysto,
 czy wyczerpała budżet tokenów. `chat_generation_service.dart` ma na to własną heurystykę
-`_endedPrematurely()` — teraz może pytać wprost.
+`_endedPrematurely()` — teraz może pytać wprost (`chunk.isTruncated`).
 
 ### 5.4 GPU
 
@@ -189,7 +212,45 @@ Uwaga na `nGpuLayers: -1` w `rag_service.dart:60` — llamadart oczekuje `0` (CP
 liczby warstw (`ModelParams.maxGpuLayers` = 999 dla pełnego offloadu). `-1` to prawdopodobnie
 zaszłość; warto zamienić na `0` lub `999` zależnie od intencji.
 
-### 5.5 Pamięć
+### 5.5 Structured output zamiast ręcznego parsowania JSON
+
+`lib/domain/import/services/llm_response_parser.dart` odkręca artefakty formatowania modelu:
+markdownowe płotki, końcowe przecinki, „inne typowe artefakty", i rzuca `FormatException`, gdy
+JSON się nie parsuje. Cały ten problem znika przy `sendPromptStructured`: schemat **ogranicza
+dekodowanie**, więc model fizycznie nie może wyemitować czegoś, co się nie sparsuje — nie ma płotków,
+nie ma wiszących przecinków, nie ma ucinania w połowie obiektu bez informacji o tym.
+
+```dart
+final output = LlmStructuredOutput.jsonSchema(
+  schema: biomarkerSchema,          // ten sam kontrakt, co dziś w prompcie
+  decoder: (json) => parser.fromJson(json),
+);
+final result = await model.sendPromptStructured(ocrText, output: output);
+```
+
+Warto zacząć od tego jednego miejsca — jest najlepiej odizolowane, ma testy i natychmiast
+kasuje klasę błędów. Uwaga: schemat nieprzekładalny na gramatykę GBNF jest odrzucany przy
+budowie `LlmStructuredOutput`, a nie w połowie generacji, więc problem wychodzi na starcie.
+
+### 5.6 Conversation zamiast ręcznego sklejania promptów
+
+`PromptFormat` (ChatML / Llama-3 / Gemma) w `ai_model_notifier.dart` i prefill tury asystenta w
+`chat_generation_service.dart` istnieją, bo plugin nie miał historii rozmowy. Teraz ma:
+`model.startConversation()` trzyma historię przy silniku, budżetuje kontekst i domyka pętlę
+narzędziową.
+
+**To osobne zadanie po migracji, nie jej część.** Dwie rzeczy do przemyślenia:
+
+- **Wznawianie po backgroundzie.** Dziś opiera się na `basePrompt + initialContent`.
+  `Conversation` trzyma historię w workerze, ale można ją wyjąć i wstawić z powrotem
+  (`history()` / `restore(List<LlmChatMessage>)`, serializowalne do JSON), więc checkpointowanie
+  jest wykonalne — tylko inaczej niż dziś.
+- **Utrata najstarszych tur.** Przy `nCtx: 8192` i rosnącej historii czatu llamadart **trwale
+  kasuje** najstarsze tury, żeby prompt się zmieścił. `Conversation.trims` to zgłasza, więc da
+  się to pokazać użytkownikowi zamiast pozwolić, żeby model po prostu „zapomniał".
+  `ContextOverflowPolicy.fail` odmawia odpowiedzi zbudowanej na obciętym prompcie.
+
+### 5.7 Pamięć
 
 `cacheTypeK` / `cacheTypeV` = `KvCacheType.q8_0` (z `flashAttention` w `auto`) połowi pamięć
 KV cache. Przy `nCtx: 8192` na telefonie to największa pojedyncza oszczędność, jaka jest
@@ -228,8 +289,11 @@ dostępna. Warto przetestować na Bieliku 4.5B.
    odpowiedź cytuje dane. Potem `rebuildIndex`.
 7. Dwukrotna zmiana modelu pod rząd — walidacja, że handshake przy `dispose()` wystarcza i
    `_isolateTeardownGrace` można usunąć (brak crasha „Cannot invoke native callback from a
-   different isolate”).
-8. Providery chmurowe (OpenAI / Gemini / Claude / Mistral) + `validateApiKey`.
+   different isolate”). Dodatkowo `unload()` + `loadModel()` innego modelu dwa razy pod rząd,
+   bez respawnu isolate.
+8. `clean()` między rozmowami — kolejna generacja startuje bez prefiksu poprzedniej i **bez**
+   przeładowania modelu, w przeciwieństwie do dzisiejszego `resetContext()`.
+9. Providery chmurowe (OpenAI / Gemini / Claude / Mistral) + `validateApiKey`.
 
 ## 7. Ryzyka, wg wagi
 

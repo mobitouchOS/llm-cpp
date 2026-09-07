@@ -119,6 +119,20 @@ void main() {
       expect(restored.supportsStatePersistence, isTrue);
     });
 
+    test(
+      'only a structured output\'s response format is sent to the worker',
+      () async {
+        final output = LlmStructuredOutput.jsonObject(decoder: (json) => json);
+
+        // The decoder *would* survive the hop — closures are sendable between
+        // isolates of the same group — but decoding stays on the calling isolate
+        // by choice, so the worker only ever receives this map.
+        expect(await _roundTrip(output.responseFormat), {
+          'type': 'json_object',
+        });
+      },
+    );
+
     test('attachments survive the isolate boundary', () async {
       final attachments = <LlamaContentPart>[
         LlamaImageContent(path: '/tmp/cat.png'),

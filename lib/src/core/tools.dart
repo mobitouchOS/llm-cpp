@@ -12,10 +12,11 @@ import 'package:llamadart/llamadart.dart'
 /// template uses.
 ///
 /// Unlike llamadart's [ToolDefinition] this carries no handler: the plugin
-/// runs generation in a worker isolate, and executing your code there would
-/// be both surprising and impossible to send across the port. Tool calls come
-/// back as data in [StreamingChunk.toolCalls]; you run them and feed the
-/// result into the next turn.
+/// runs generation in a worker isolate, and silently executing your tool code
+/// inside it — away from the state, plugins and I/O your app expects to have —
+/// is not a decision this plugin should make for you. Tool calls come back as
+/// data in [StreamingChunk.toolCalls]; you run them and feed the result into
+/// the next turn.
 class LlmTool {
   /// Unique name the model uses to reference the tool (e.g. `get_weather`).
   final String name;

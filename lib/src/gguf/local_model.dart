@@ -6,6 +6,7 @@ import '../core/generation_overrides.dart';
 import '../core/llm_config.dart';
 import '../core/llm_interface.dart';
 import '../core/model_diagnostics.dart';
+import '../core/structured_output.dart';
 import '../core/streaming_result.dart';
 import '../models/llm_model_base.dart';
 import '../models/llm_model_isolated.dart';
@@ -108,6 +109,46 @@ class LocalModel implements LlmInterface {
     _ensureInitialized();
     return _model!.sendPromptStream(
       prompt,
+      systemPrompt: systemPrompt,
+      attachments: attachments,
+      overrides: overrides,
+    );
+  }
+
+  // ── Structured output ────────────────────────────────────────────────────
+
+  /// Generates JSON constrained to [output]'s schema and decodes it into `T`.
+  ///
+  /// The schema constrains decoding, so the model cannot emit anything that
+  /// would not parse. A schema llamadart cannot turn into a grammar is
+  /// rejected when you build the [LlmStructuredOutput], not mid-generation.
+  ///
+  /// ```dart
+  /// final output = LlmStructuredOutput.jsonSchema(
+  ///   schema: {
+  ///     'type': 'object',
+  ///     'properties': {'city': {'type': 'string'}},
+  ///     'required': ['city'],
+  ///   },
+  ///   decoder: (json) => json['city'] as String,
+  /// );
+  /// final result = await model.sendPromptStructured(
+  ///   'Which city is the capital of Poland?',
+  ///   output: output,
+  /// );
+  /// print(result.value);
+  /// ```
+  Future<LlmStructuredResult<T>> sendPromptStructured<T>(
+    String prompt, {
+    required LlmStructuredOutput<T> output,
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
+  }) {
+    _ensureInitialized();
+    return _model!.sendPromptStructured(
+      prompt,
+      output: output,
       systemPrompt: systemPrompt,
       attachments: attachments,
       overrides: overrides,

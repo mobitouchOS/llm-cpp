@@ -48,6 +48,7 @@ export 'src/core/llm_interface.dart';
 export 'src/core/model_diagnostics.dart';
 export 'src/core/performance_metrics.dart';
 export 'src/core/streaming_result.dart';
+export 'src/core/structured_output.dart';
 export 'src/core/tools.dart';
 
 // ── Local Model (GGUF) ───────────────────────────────────────────────────────

@@ -66,6 +66,47 @@ class GenerationOverrides {
     this.responseFormat,
   });
 
+  /// Returns a copy with the given fields replaced. Passing null keeps the
+  /// current value — there is deliberately no way to clear a field back to
+  /// null, because an unset override already means "use the config".
+  GenerationOverrides copyWith({
+    int? maxTokens,
+    double? temp,
+    int? topK,
+    double? topP,
+    double? minP,
+    double? penaltyRepeat,
+    double? presencePenalty,
+    int? seed,
+    List<String>? stopSequences,
+    String? grammar,
+    String? grammarRoot,
+    bool? enableThinking,
+    ThinkingBudget? thinkingBudget,
+    List<LlmTool>? tools,
+    ToolChoice? toolChoice,
+    bool? parallelToolCalls,
+    Map<String, dynamic>? responseFormat,
+  }) => GenerationOverrides(
+    maxTokens: maxTokens ?? this.maxTokens,
+    temp: temp ?? this.temp,
+    topK: topK ?? this.topK,
+    topP: topP ?? this.topP,
+    minP: minP ?? this.minP,
+    penaltyRepeat: penaltyRepeat ?? this.penaltyRepeat,
+    presencePenalty: presencePenalty ?? this.presencePenalty,
+    seed: seed ?? this.seed,
+    stopSequences: stopSequences ?? this.stopSequences,
+    grammar: grammar ?? this.grammar,
+    grammarRoot: grammarRoot ?? this.grammarRoot,
+    enableThinking: enableThinking ?? this.enableThinking,
+    thinkingBudget: thinkingBudget ?? this.thinkingBudget,
+    tools: tools ?? this.tools,
+    toolChoice: toolChoice ?? this.toolChoice,
+    parallelToolCalls: parallelToolCalls ?? this.parallelToolCalls,
+    responseFormat: responseFormat ?? this.responseFormat,
+  );
+
   /// Applies these overrides on top of [base].
   GenerationParams applyTo(GenerationParams base) => base.copyWith(
     maxTokens: maxTokens,

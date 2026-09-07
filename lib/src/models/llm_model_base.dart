@@ -1,8 +1,12 @@
 // lib/src/models/llm_model_base.dart
 import 'package:flutter/foundation.dart';
 
+import 'package:llamadart/llamadart.dart' show LlamaContentPart;
+
+import '../core/generation_overrides.dart';
 import '../core/llm_interface.dart';
 import '../core/model_diagnostics.dart';
+import '../core/structured_output.dart';
 
 abstract class LlmModelBase implements LlmInterface {
   // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -20,6 +24,27 @@ abstract class LlmModelBase implements LlmInterface {
   /// memory and the cached prompt tokens before ingesting its prompt —
   /// nothing is recomputed until then, so calling this is free.
   Future<void> clean({bool resetConversations = true});
+
+  // ── Structured output ────────────────────────────────────────────────────
+
+  /// Generates JSON constrained to [output]'s schema and decodes it.
+  ///
+  /// Implemented over [sendPromptStream]: only the response format crosses to
+  /// the worker, and decoding happens on this isolate.
+  Future<LlmStructuredResult<T>> sendPromptStructured<T>(
+    String prompt, {
+    required LlmStructuredOutput<T> output,
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
+  }) => sendPromptStream(
+    prompt,
+    systemPrompt: systemPrompt,
+    attachments: attachments,
+    overrides: (overrides ?? const GenerationOverrides()).copyWith(
+      responseFormat: output.responseFormat,
+    ),
+  ).parseStructured(output);
 
   // ── Tokenization ─────────────────────────────────────────────────────────
 

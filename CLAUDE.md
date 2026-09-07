@@ -135,6 +135,23 @@ cannot (and should not) execute there. Completed calls arrive as data on
 fragments, and `ToolCallAccumulator` (`lib/src/core/tools.dart`) reassembles them so callers do
 not have to.
 
+### Structured output
+
+`LlmStructuredOutput<T>` (`lib/src/core/structured_output.dart`) wraps llamadart's builder:
+`jsonObject`, `jsonSchema`, `jsonValueSchema`. Use it through
+`LocalModel.sendPromptStructured(prompt, output: …)`, or apply `parseStructured(output)` to any
+`Stream<StreamingChunk>`.
+
+Decoding runs on the **calling** isolate: only `responseFormat` (a plain map) is sent to the
+worker. Closures *are* sendable between isolates of one group, so this is a choice, not a
+constraint — running caller-supplied decoding inside the inference worker is not something the
+plugin should decide.
+
+Failures are separated by when they are knowable: an unconvertible schema throws
+`LlamaUnsupportedException` at construction; a backend that cannot constrain decoding throws at
+stream start; truncation at the token budget is reported as truncation rather than as a JSON
+parse offset; bad JSON, schema mismatches and throwing decoders become `LlamaInferenceException`.
+
 ### Engine operations beyond generation
 
 `LocalModel` also exposes, on both backends:

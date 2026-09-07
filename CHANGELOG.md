@@ -30,7 +30,14 @@
   llama.cpp backend alive, so the next `loadModel` skips isolate spawn and backend
   initialization. `LocalModel.loadModel` now swaps the model inside the live worker instead of
   tearing it down and respawning — switching models was the expensive path.
-- **Tool calling and structured output.** Declare tools per request with
+- **Typed structured output.** `LlmStructuredOutput<T>` (`jsonObject`, `jsonSchema`,
+  `jsonValueSchema`) plus `LocalModel.sendPromptStructured` and a `parseStructured` extension on
+  any `Stream<StreamingChunk>`. The schema constrains decoding, so the model cannot emit
+  something that would not parse; a schema llamadart cannot turn into a grammar is rejected when
+  you build the object, not mid-generation. Decoding happens on the calling isolate — only the
+  response format is sent to the worker. A response cut off at the token budget now says so
+  instead of surfacing as a confusing `jsonDecode` offset.
+- **Tool calling.** Declare tools per request with
   `GenerationOverrides.tools` (`LlmTool`), plus `toolChoice`, `parallelToolCalls` and
   `responseFormat`. Completed calls arrive on `StreamingChunk.toolCalls`, reassembled from the
   fragments llamadart streams. None of llamadart 0.8.x's tool work — the area it invested most

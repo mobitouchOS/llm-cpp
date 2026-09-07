@@ -53,6 +53,4 @@ abstract interface class LlmInterface {
   /// Awaiting this matters: llama.cpp frees native handles during teardown,
   /// and loading another model before that finishes races those handles.
   Future<void> dispose();
-
-  void clean();
 }

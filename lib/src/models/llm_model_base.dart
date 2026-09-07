@@ -5,6 +5,22 @@ import '../core/llm_interface.dart';
 import '../core/model_diagnostics.dart';
 
 abstract class LlmModelBase implements LlmInterface {
+  // ── Lifecycle ────────────────────────────────────────────────────────────
+
+  /// Frees the model and its context but keeps the backend — and, for the
+  /// isolate backend, the worker isolate — alive, so the next [loadModel]
+  /// skips isolate spawn and llama.cpp initialization. Switching models is
+  /// the case this exists for.
+  Future<void> unload();
+
+  /// Drops the reused prompt prefix and the KV cache it stands for.
+  ///
+  /// llama.cpp has no call that forgets the cache on the spot. The next
+  /// generation runs with `reusePromptPrefix: false`, which clears context
+  /// memory and the cached prompt tokens before ingesting its prompt —
+  /// nothing is recomputed until then, so calling this is free.
+  Future<void> clean({bool resetConversations = true});
+
   // ── Tokenization ─────────────────────────────────────────────────────────
 
   /// Tokenizes [text] with the loaded model's tokenizer.
@@ -67,6 +83,15 @@ abstract class LlmModelBase implements LlmInterface {
   @protected
   void markAsInitialized() {
     _isInitialized = true;
+  }
+
+  /// Marks the model as unloaded while keeping the instance usable: the
+  /// backend and its worker isolate stay alive, so the next [loadModel] skips
+  /// spawning and backend initialization.
+  @protected
+  void markAsUnloaded() {
+    _isInitialized = false;
+    _isGenerating = false;
   }
 
   @protected

@@ -25,32 +25,91 @@ const Duration _disposeTimeout = Duration(seconds: 5);
 // ── Worker Isolate entry point ─────────────────────────────────────────────
 
 Future<void> _llamaIsolateWorkerMain(Map<String, dynamic> args) async {
-  final String modelPath = args['modelPath'] as String;
   final LlmConfig config = args['config'] as LlmConfig;
   final SendPort mainPort = args['sendPort'] as SendPort;
 
+  // The worker starts with an engine but no model: loading is a message, so a
+  // model can be swapped with `unload` + `load` without respawning the isolate
+  // and re-initializing the llama.cpp backend.
   final engine = LlamaEngine(LlamaBackend());
-  try {
-    await engine.loadModel(modelPath, modelParams: buildModelParams(config));
-    if (config.mmprojPath != null) {
-      await engine.loadMultimodalProjector(config.mmprojPath!);
-    }
-  } catch (e) {
-    mainPort.send({'type': 'error', ...encodeError(e)});
-    return;
-  }
-
   final baseParams = buildGenerationParams(config);
 
   final receivePort = ReceivePort();
   mainPort.send({'type': 'ready', 'port': receivePort.sendPort});
 
   StreamSubscription<LlamaCompletionChunk>? genSubscription;
+  // Releases the queue slot held by the running generation. Cancellation does
+  // not fire onDone, so cancelling has to settle this explicitly.
+  void Function()? genComplete;
+
+  // llama.cpp has no "forget the prompt cache now" call. `clean` raises this
+  // flag and the next generation runs with `reusePromptPrefix: false`, which
+  // clears context memory and the cached prompt tokens before ingesting.
+  var pendingPrefixInvalidation = false;
+
+  // llamadart's model lifecycle mutex is non-reentrant: overlapping load /
+  // unload / dispose throw LlamaStateException. Generation joins the same
+  // queue so a load never lands mid-stream.
+  var queue = Future<void>.value();
+  Future<T> serialized<T>(Future<T> Function() action) {
+    final completer = Completer<T>();
+    queue = queue.then((_) async {
+      try {
+        completer.complete(await action());
+      } catch (error, stackTrace) {
+        completer.completeError(error, stackTrace);
+      }
+    });
+    return completer.future;
+  }
+
+  // Stops an in-flight generation *outside* the queue, so unload and dispose
+  // interrupt it instead of waiting behind it.
+  Future<void> abortGeneration() async {
+    final sub = genSubscription;
+    genSubscription = null;
+    if (sub == null) return;
+    engine.cancelGeneration();
+    await sub.cancel();
+    genComplete?.call();
+  }
 
   await for (final message in receivePort) {
     if (message is! Map<String, dynamic>) continue;
 
     switch (message['type'] as String?) {
+      case 'load':
+        final replyPort = message['replyPort'] as SendPort;
+        try {
+          await serialized(() async {
+            await engine.loadModel(
+              message['modelPath'] as String,
+              modelParams: buildModelParams(config),
+            );
+            if (config.mmprojPath != null) {
+              await engine.loadMultimodalProjector(config.mmprojPath!);
+            }
+          });
+          replyPort.send({'type': 'ok'});
+        } catch (e) {
+          replyPort.send({'type': 'error', ...encodeError(e)});
+        }
+
+      case 'unload':
+        final replyPort = message['replyPort'] as SendPort;
+        await abortGeneration();
+        try {
+          await serialized(engine.unloadModel);
+          pendingPrefixInvalidation = false;
+          replyPort.send({'type': 'ok'});
+        } catch (e) {
+          replyPort.send({'type': 'error', ...encodeError(e)});
+        }
+
+      case 'clean':
+        pendingPrefixInvalidation = true;
+        (message['replyPort'] as SendPort?)?.send({'type': 'ok'});
+
       case 'generate':
         final prompt = message['prompt'] as String;
         final systemPrompt = message['systemPrompt'] as String?;
@@ -59,64 +118,86 @@ Future<void> _llamaIsolateWorkerMain(Map<String, dynamic> args) async {
         final overrides = message['overrides'] as GenerationOverrides?;
         final streamPort = message['streamPort'] as SendPort;
 
-        final params = overrides?.applyTo(baseParams) ?? baseParams;
+        var params = overrides?.applyTo(baseParams) ?? baseParams;
+        if (pendingPrefixInvalidation) {
+          params = params.copyWith(reusePromptPrefix: false);
+          pendingPrefixInvalidation = false;
+        }
         final enableThinking =
             overrides?.enableThinking ?? config.enableThinkingDefault;
 
-        String? finishReason;
-        final toolCalls = ToolCallAccumulator();
+        // Not awaited: the queued action outlives this message handler, so the
+        // worker keeps servicing `cancel` and `unload` while tokens stream.
+        unawaited(
+          serialized(() async {
+            String? finishReason;
+            final toolCalls = ToolCallAccumulator();
+            final finished = Completer<void>();
 
-        genSubscription = engine
-            .create(
-              buildMessages(
-                prompt,
-                systemPrompt: systemPrompt,
-                attachments: attachments,
-              ),
-              params: params,
-              enableThinking: enableThinking,
-              tools: overrides?.tools
-                  ?.map((t) => t.toToolDefinition())
-                  .toList(),
-              toolChoice: overrides?.toolChoice,
-              parallelToolCalls: overrides?.parallelToolCalls ?? false,
-              responseFormat: overrides?.responseFormat,
-            )
-            .listen(
-              (chunk) {
-                final choice = chunk.choices.firstOrNull;
-                finishReason = choice?.finishReason ?? finishReason;
+            void complete() {
+              if (!finished.isCompleted) finished.complete();
+            }
 
-                final deltas = choice?.delta.toolCalls;
-                if (deltas != null) toolCalls.add(deltas);
+            genComplete = complete;
 
-                final text = choice?.delta.content;
-                if (text != null) {
-                  streamPort.send({'type': 'token', 'text': text});
-                }
-                final thinking = choice?.delta.thinking;
-                if (thinking != null) {
-                  streamPort.send({'type': 'token', 'thinking': thinking});
-                }
-              },
-              onDone: () async {
-                genSubscription = null;
-                streamPort.send({
-                  'type': 'done',
-                  if (finishReason != null) 'finishReason': finishReason,
-                  'perf': await readBackendPerf(engine),
-                  if (!toolCalls.isEmpty)
-                    'toolCalls': toolCalls
-                        .build()
-                        .map((c) => c.toMap())
-                        .toList(),
-                });
-              },
-              onError: (Object e) {
-                genSubscription = null;
-                streamPort.send({'type': 'error', ...encodeError(e)});
-              },
-            );
+            genSubscription = engine
+                .create(
+                  buildMessages(
+                    prompt,
+                    systemPrompt: systemPrompt,
+                    attachments: attachments,
+                  ),
+                  params: params,
+                  enableThinking: enableThinking,
+                  tools: overrides?.tools
+                      ?.map((t) => t.toToolDefinition())
+                      .toList(),
+                  toolChoice: overrides?.toolChoice,
+                  parallelToolCalls: overrides?.parallelToolCalls ?? false,
+                  responseFormat: overrides?.responseFormat,
+                )
+                .listen(
+                  (chunk) {
+                    final choice = chunk.choices.firstOrNull;
+                    finishReason = choice?.finishReason ?? finishReason;
+
+                    final deltas = choice?.delta.toolCalls;
+                    if (deltas != null) toolCalls.add(deltas);
+
+                    final text = choice?.delta.content;
+                    if (text != null) {
+                      streamPort.send({'type': 'token', 'text': text});
+                    }
+                    final thinking = choice?.delta.thinking;
+                    if (thinking != null) {
+                      streamPort.send({'type': 'token', 'thinking': thinking});
+                    }
+                  },
+                  onDone: () async {
+                    genSubscription = null;
+                    streamPort.send({
+                      'type': 'done',
+                      if (finishReason != null) 'finishReason': finishReason,
+                      'perf': await readBackendPerf(engine),
+                      if (!toolCalls.isEmpty)
+                        'toolCalls': toolCalls
+                            .build()
+                            .map((c) => c.toMap())
+                            .toList(),
+                    });
+                    complete();
+                  },
+                  onError: (Object e) {
+                    genSubscription = null;
+                    streamPort.send({'type': 'error', ...encodeError(e)});
+                    complete();
+                  },
+                );
+
+            await finished.future;
+            genComplete = null;
+          }),
+        );
 
       case 'call':
         final replyPort = message['replyPort'] as SendPort;
@@ -132,13 +213,10 @@ Future<void> _llamaIsolateWorkerMain(Map<String, dynamic> args) async {
         }
 
       case 'cancel':
-        genSubscription?.cancel();
-        genSubscription = null;
-        engine.cancelGeneration();
+        await abortGeneration();
 
       case 'dispose':
-        await genSubscription?.cancel();
-        genSubscription = null;
+        await abortGeneration();
         await engine.dispose();
         (message['replyPort'] as SendPort?)?.send({'type': 'disposed'});
         receivePort.close();
@@ -165,24 +243,60 @@ class LlmModelIsolated extends LlmModelBase {
       throw FileSystemException('File not found', localPath);
     }
 
+    await _ensureWorker();
+    await _request('load', {
+      'modelPath': localPath,
+    }, context: 'Model load failed');
+    markAsInitialized();
+  }
+
+  /// Spawns the worker isolate on first use. The worker comes up with a
+  /// llama.cpp backend but no model, so later loads reuse it.
+  Future<void> _ensureWorker() async {
+    if (_workerPort != null) return;
+
     final initPort = ReceivePort();
     _isolate = await Isolate.spawn(_llamaIsolateWorkerMain, {
-      'modelPath': localPath,
       'config': config,
       'sendPort': initPort.sendPort,
     }, debugName: 'mt_llmkit_LlamaWorker');
 
     final initMsg = await initPort.first as Map<String, dynamic>;
     initPort.close();
-
-    if (initMsg['type'] == 'error') {
-      _isolate?.kill();
-      _isolate = null;
-      throw decodeError(initMsg, context: 'LlmModelIsolated init failed');
-    }
-
     _workerPort = initMsg['port'] as SendPort;
-    markAsInitialized();
+  }
+
+  /// Sends one request-reply message to the worker.
+  Future<void> _request(
+    String type,
+    Map<String, dynamic> args, {
+    required String context,
+  }) async {
+    final replyPort = ReceivePort();
+    _workerPort!.send({...args, 'type': type, 'replyPort': replyPort.sendPort});
+
+    final reply = (await replyPort.first as Map).cast<String, dynamic>();
+    replyPort.close();
+
+    if (reply['type'] == 'error') {
+      throw decodeError(reply, context: context);
+    }
+  }
+
+  @override
+  Future<void> unload() async {
+    checkNotDisposed();
+    if (_workerPort == null) return;
+    await _request('unload', const {}, context: 'Model unload failed');
+    markAsUnloaded();
+  }
+
+  @override
+  Future<void> clean({bool resetConversations = true}) async {
+    checkInitialized();
+    await _request('clean', {
+      'resetConversations': resetConversations,
+    }, context: 'clean() failed');
   }
 
   // Bridges worker SendPort messages into a stream of events. The terminal
@@ -469,10 +583,4 @@ class LlmModelIsolated extends LlmModelBase {
   @override
   Future<ModelDiagnostics> diagnostics() async =>
       (await _call('diagnostics')) as ModelDiagnostics;
-
-  @override
-  void clean() {
-    checkInitialized();
-    // create() is stateless in llamadart — no context to reset
-  }
 }

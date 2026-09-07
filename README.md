@@ -143,7 +143,7 @@ model.dispose();
 | Backend | Class | When to use |
 |---|---|---|
 | `ModelBackend.isolate` *(default)* | `LlmModelIsolated` | Production. Runs in a Dart Isolate — no UI jank. Required when loading multiple models (e.g. RAG). |
-| `ModelBackend.inProcess` | `LlmModelStandard` | Lighter startup cost. Supports `clean()` to reset context without reloading the model. |
+| `ModelBackend.inProcess` | `LlmModelStandard` | Lighter startup cost. Runs on the calling thread. |
 
 ```dart
 // Isolate backend (default)
@@ -151,10 +151,26 @@ final model = LocalModel(backend: ModelBackend.isolate);
 
 // In-process backend
 final model = LocalModel(backend: ModelBackend.inProcess);
-model.clean(); // reset context — only available with inProcess
 ```
 
-> **Note:** `clean()` throws `UnsupportedError` when called on the `isolate` backend.
+### Model lifecycle
+
+```dart
+await model.loadModel(pathA);
+await model.unload();          // frees the model, keeps the worker + backend
+await model.loadModel(pathB);  // no isolate spawn, no llama.cpp re-init
+
+await model.clean();           // drop the reused prompt prefix and its KV cache
+await model.dispose();         // tear everything down
+```
+
+`loadModel` on a model that already has one loaded does the `unload` for you, so switching
+models never respawns the worker isolate.
+
+`clean()` works on **both** backends. llama.cpp has no call that forgets the prompt cache on the
+spot, so the next generation runs with `reusePromptPrefix: false`, which clears context memory
+and the cached prompt tokens before ingesting — nothing is recomputed until then, so calling it
+is free.
 
 ### Configuration
 

@@ -402,9 +402,6 @@ class _CoordPlugin implements LlmInterface {
 
   @override
   Future<void> dispose() async {}
-
-  @override
-  void clean() {}
 }
 
 // ── LlamaRagCoordinator ───────────────────────────────────────────────────────

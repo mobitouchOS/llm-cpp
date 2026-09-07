@@ -142,4 +142,33 @@ void main() {
       expect(standard.clean, isA<Function>());
     });
   });
+
+  group('LlmModelIsolated - unload', () {
+    test('unload before a model is loaded is a no-op', () async {
+      final model = LlmModelIsolated(const LlmConfig());
+
+      await expectLater(model.unload(), completes);
+      expect(model.isInitialized, false);
+      expect(model.isDisposed, false);
+
+      await model.dispose();
+    });
+
+    test('unload after dispose throws', () async {
+      final model = LlmModelIsolated(const LlmConfig());
+      await model.dispose();
+
+      expect(model.unload(), throwsStateError);
+    });
+
+    test('clean before a model is loaded throws StateError, not '
+        'UnsupportedError', () async {
+      final model = LlmModelIsolated(const LlmConfig());
+
+      // clean() used to be unsupported on the isolate backend entirely.
+      await expectLater(model.clean(), throwsStateError);
+
+      await model.dispose();
+    });
+  });
 }

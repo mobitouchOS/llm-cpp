@@ -19,6 +19,11 @@ class LlmModelStandard extends LlmModelBase {
   final LlmConfig config;
   LlamaEngine? _engine;
 
+  // llama.cpp has no "forget the prompt cache now" call; the next generation
+  // runs with `reusePromptPrefix: false`, which clears context memory and the
+  // cached prompt tokens before ingesting. See [clean].
+  bool _pendingPrefixInvalidation = false;
+
   LlmModelStandard(this.config);
 
   Stream<LlamaCompletionChunk> _create(
@@ -27,7 +32,11 @@ class LlmModelStandard extends LlmModelBase {
     List<LlamaContentPart>? attachments,
     GenerationOverrides? overrides,
   ) {
-    final base = buildGenerationParams(config);
+    var base = buildGenerationParams(config);
+    if (_pendingPrefixInvalidation) {
+      base = base.copyWith(reusePromptPrefix: false);
+      _pendingPrefixInvalidation = false;
+    }
     return _engine!.create(
       buildMessages(
         prompt,
@@ -52,14 +61,35 @@ class LlmModelStandard extends LlmModelBase {
       throw FileSystemException('File not found', localPath);
     }
 
-    _engine = LlamaEngine(LlamaBackend());
-    await _engine!.loadModel(localPath, modelParams: buildModelParams(config));
+    // Reuse the engine across loads: llamadart supports load → unload → load
+    // on one instance, and skipping backend re-initialization is the whole
+    // point of unload().
+    final engine = _engine ??= LlamaEngine(LlamaBackend());
+    if (engine.isReady) await engine.unloadModel();
+
+    await engine.loadModel(localPath, modelParams: buildModelParams(config));
 
     if (config.mmprojPath != null) {
-      await _engine!.loadMultimodalProjector(config.mmprojPath!);
+      await engine.loadMultimodalProjector(config.mmprojPath!);
     }
 
     markAsInitialized();
+  }
+
+  @override
+  Future<void> unload() async {
+    checkNotDisposed();
+    final engine = _engine;
+    if (engine == null || !engine.isReady) return;
+    await engine.unloadModel();
+    _pendingPrefixInvalidation = false;
+    markAsUnloaded();
+  }
+
+  @override
+  Future<void> clean({bool resetConversations = true}) async {
+    checkInitialized();
+    _pendingPrefixInvalidation = true;
   }
 
   @override
@@ -272,10 +302,4 @@ class LlmModelStandard extends LlmModelBase {
   @override
   Future<ModelDiagnostics> diagnostics() async =>
       (await _call('diagnostics')) as ModelDiagnostics;
-
-  @override
-  void clean() {
-    checkInitialized();
-    // create() is stateless in llamadart — no context to reset
-  }
 }

@@ -2,6 +2,12 @@
 
 ### Fixed
 
+- `clean()` does something. It was a no-op documented as "create() is stateless in llamadart —
+  no context to reset", which is false: `reusePromptPrefix` defaults to `true` and llamadart
+  deliberately reuses a matching KV prompt prefix across calls. It now drops that prefix (the
+  next generation runs with `reusePromptPrefix: false`, clearing context memory and the cached
+  prompt tokens), and it works on the isolate backend, where `LocalModel.clean()` previously
+  threw `UnsupportedError`.
 - RAG embedding now uses llamadart's native batch call instead of one isolate round-trip per
   chunk, sizes chunks with the model's tokenizer instead of a fixed 2000-character cut (which is
   roughly 500–700 tokens and therefore overran the 512-token encoder context on long chunks),
@@ -20,6 +26,10 @@
 
 ### Added
 
+- **`unload()`** frees the model and its context while keeping the worker isolate and the
+  llama.cpp backend alive, so the next `loadModel` skips isolate spawn and backend
+  initialization. `LocalModel.loadModel` now swaps the model inside the live worker instead of
+  tearing it down and respawning — switching models was the expensive path.
 - **Tool calling and structured output.** Declare tools per request with
   `GenerationOverrides.tools` (`LlmTool`), plus `toolChoice`, `parallelToolCalls` and
   `responseFormat`. Completed calls arrive on `StreamingChunk.toolCalls`, reassembled from the
@@ -61,6 +71,9 @@
 
 ### Changed
 
+- **BREAKING (API):** `void clean()` is now `Future<void> clean({bool resetConversations = true})`
+  and is no longer part of `LlmInterface` — sending a prompt and resetting the cache are
+  different concerns. It lives on `LocalModel` and `LlmModelBase`.
 - **BREAKING (API):** the `images` parameter on `sendPrompt*` is now `attachments`, typed
   `List<LlamaContentPart>`. `LlamaImageContent` still works; audio-capable models (Gemma 4,
   Qwen3-ASR) can now be reached with `LlamaAudioContent`, which the old signature made

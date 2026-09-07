@@ -92,7 +92,12 @@ class MockLlmModel extends LlmModelBase {
   }
 
   @override
-  void clean() {
+  Future<void> unload() async {
+    markAsUnloaded();
+  }
+
+  @override
+  Future<void> clean({bool resetConversations = true}) async {
     checkInitialized();
     _cleanCalled = true;
   }

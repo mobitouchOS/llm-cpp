@@ -115,4 +115,37 @@ void main() {
       expect(() => model.clean(), throwsStateError);
     });
   });
+
+  group('LlmModelStandard - unload', () {
+    test('unload before a model is loaded is a no-op', () async {
+      final model = LlmModelStandard(const LlmConfig());
+
+      await expectLater(model.unload(), completes);
+      expect(model.isInitialized, false);
+      expect(model.isDisposed, false);
+
+      await model.dispose();
+    });
+
+    test('unload leaves the instance reusable, unlike dispose', () async {
+      final model = LlmModelStandard(const LlmConfig());
+      await model.unload();
+
+      // Still loadable: unload frees the model, not the backend.
+      expect(model.isDisposed, false);
+      expect(
+        () => model.loadModel('/nonexistent/model.gguf'),
+        throwsA(isA<FileSystemException>()),
+      );
+
+      await model.dispose();
+    });
+
+    test('unload after dispose throws', () async {
+      final model = LlmModelStandard(const LlmConfig());
+      await model.dispose();
+
+      expect(model.unload(), throwsStateError);
+    });
+  });
 }

@@ -162,12 +162,25 @@ failed, retry on CPU") stays distinguishable from `LlamaModelException` ("model 
 corrupt") and `LlamaUnsupportedException` (e.g. aLoRA adapters, hard-failing since llamadart
 0.8.22). The hierarchy is re-exported from `lib/mt_llmkit.dart`.
 
-### Teardown
+### Lifecycle
+
+The worker isolate is spawned with a llama.cpp backend but **no model**: loading is a message
+(`load`), so `unload()` + `loadModel()` swaps models without respawning the isolate or
+re-initializing the backend. `LocalModel.loadModel` does that swap for you when a model is
+already loaded. Inside the worker, `load` / `unload` / `dispose` and generation share one
+`Future` queue — llamadart's model-lifecycle mutex is non-reentrant and throws
+`LlamaStateException` on overlap — while `unload` and `dispose` first abort in-flight generation
+*outside* the queue so they interrupt it instead of waiting behind it.
+
+`clean()` works on both backends and is `Future<void>`. llama.cpp has no call that forgets the
+prompt cache on the spot, so it raises a flag and the next generation runs with
+`reusePromptPrefix: false`, which clears context memory and the cached prompt tokens before
+ingesting. It is **not** on `LlmInterface` — it is not part of "send a prompt".
 
 `dispose()` is `Future<void>` everywhere (`LlmInterface`, `LocalModel`, both backends,
 `RagEngine`) and **must be awaited**. Isolate-backed implementations wait for the worker to
 acknowledge that llama.cpp released its native handles (5 s timeout) before killing the
-isolate; `LocalModel.loadModel` awaits the previous model's teardown before loading the next.
+isolate.
 
 ### Cloud AI Providers
 

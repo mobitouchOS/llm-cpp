@@ -34,13 +34,29 @@ class LocalModel implements LlmInterface {
 
   @override
   Future<void> loadModel(String localPath) async {
-    // Awaited: the previous model's native handles must be freed before the
-    // next one starts allocating.
-    await _model?.dispose();
+    final existing = _model;
+    if (existing != null && !existing.isDisposed) {
+      // Swap the model inside the live backend: the worker isolate and the
+      // llama.cpp backend stay up, and the previous model's native handles are
+      // freed before the next one starts allocating.
+      await existing.unload();
+      await existing.loadModel(localPath);
+      return;
+    }
+
     _model = backend == ModelBackend.isolate
         ? LlmModelIsolated(config)
         : LlmModelStandard(config);
     await _model!.loadModel(localPath);
+  }
+
+  /// Frees the model and its context but keeps the backend — and, on
+  /// [ModelBackend.isolate], the worker isolate — alive, so the next
+  /// [loadModel] skips isolate spawn and llama.cpp initialization.
+  Future<void> unload() async {
+    final model = _model;
+    if (model == null || model.isDisposed) return;
+    await model.unload();
   }
 
   @override
@@ -189,18 +205,18 @@ class LocalModel implements LlmInterface {
   @override
   bool get isInitialized => _model?.isInitialized ?? false;
 
-  /// Resets the conversation context without reloading the model.
+  /// Drops the reused prompt prefix and the KV cache it stands for, so the
+  /// next generation starts from a clean context.
   ///
-  /// Only supported with [ModelBackend.inProcess].
-  /// Throws [UnsupportedError] with [ModelBackend.isolate].
-  @override
-  void clean() {
+  /// llama.cpp has no call that forgets the cache on the spot: the next
+  /// generation runs with `reusePromptPrefix: false`, which clears context
+  /// memory and the cached prompt tokens before ingesting its prompt. Nothing
+  /// is recomputed until then, so calling this is free.
+  ///
+  /// Works on both backends.
+  Future<void> clean({bool resetConversations = true}) {
     _ensureInitialized();
-    if (backend == ModelBackend.inProcess) {
-      _model!.clean();
-    } else {
-      throw UnsupportedError('clean() requires ModelBackend.inProcess.');
-    }
+    return _model!.clean(resetConversations: resetConversations);
   }
 
   void _ensureInitialized() {

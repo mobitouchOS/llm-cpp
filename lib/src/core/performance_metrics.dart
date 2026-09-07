@@ -20,6 +20,26 @@ class PerformanceMetrics {
   /// End timestamp
   final DateTime endTime;
 
+  /// Number of prompt tokens evaluated (prefill). Null unless the backend
+  /// reported its own counters — see [isExact].
+  final int? promptTokens;
+
+  /// Time llama.cpp spent evaluating the prompt, in milliseconds. Null unless
+  /// the backend reported its own counters.
+  final double? promptEvalMs;
+
+  /// Time llama.cpp spent generating tokens, in milliseconds. Null unless the
+  /// backend reported its own counters.
+  final double? evalMs;
+
+  /// Whether these numbers come from llama.cpp's own counters.
+  ///
+  /// Live metrics emitted while streaming are estimates: llamadart batches the
+  /// stream according to `streamBatchTokenThreshold` / `streamBatchByteThreshold`,
+  /// so one chunk is not necessarily one token. The final chunk carries exact
+  /// numbers whenever the backend exposes them.
+  final bool isExact;
+
   PerformanceMetrics({
     required this.tokensGenerated,
     required this.durationMs,
@@ -27,9 +47,18 @@ class PerformanceMetrics {
     required this.msPerToken,
     required this.startTime,
     required this.endTime,
+    this.promptTokens,
+    this.promptEvalMs,
+    this.evalMs,
+    this.isExact = false,
   });
 
-  /// Creates performance metrics from generation data
+  /// Creates performance metrics from generation data.
+  ///
+  /// [tokenCount] is a chunk count, which only equals the token count while
+  /// stream batching is disabled — the result is an estimate ([isExact] is
+  /// false). Prefer [PerformanceMetrics.fromBackendPerf] when the backend
+  /// reports its own counters.
   factory PerformanceMetrics.fromGeneration({
     required int tokenCount,
     required DateTime startTime,
@@ -52,6 +81,38 @@ class PerformanceMetrics {
     );
   }
 
+  /// Creates exact metrics from llama.cpp's own performance counters.
+  ///
+  /// [evalTokens] and [evalMs] cover generation only, so [tokensPerSecond] is
+  /// decode throughput and excludes prompt ingestion. When [evalMs] is missing
+  /// or zero, throughput falls back to wall-clock time.
+  factory PerformanceMetrics.fromBackendPerf({
+    required int evalTokens,
+    required DateTime startTime,
+    required DateTime endTime,
+    int? promptTokens,
+    double? promptEvalMs,
+    double? evalMs,
+  }) {
+    final wallClockMs = endTime.difference(startTime).inMilliseconds;
+    final measuredMs = (evalMs != null && evalMs > 0)
+        ? evalMs
+        : wallClockMs.toDouble();
+
+    return PerformanceMetrics(
+      tokensGenerated: evalTokens,
+      durationMs: wallClockMs,
+      tokensPerSecond: measuredMs > 0 ? (evalTokens * 1000) / measuredMs : 0.0,
+      msPerToken: evalTokens > 0 ? measuredMs / evalTokens : 0.0,
+      startTime: startTime,
+      endTime: endTime,
+      promptTokens: promptTokens,
+      promptEvalMs: promptEvalMs,
+      evalMs: evalMs,
+      isExact: true,
+    );
+  }
+
   /// Duration of generation
   Duration get duration => Duration(milliseconds: durationMs);
 
@@ -61,7 +122,8 @@ class PerformanceMetrics {
         'tokens: $tokensGenerated, '
         'duration: ${durationMs}ms, '
         't/s: ${tokensPerSecond.toStringAsFixed(2)}, '
-        'ms/token: ${msPerToken.toStringAsFixed(2)}'
+        'ms/token: ${msPerToken.toStringAsFixed(2)}, '
+        'exact: $isExact'
         ')';
   }
 
@@ -74,6 +136,10 @@ class PerformanceMetrics {
       'msPerToken': msPerToken,
       'startTime': startTime.toIso8601String(),
       'endTime': endTime.toIso8601String(),
+      if (promptTokens != null) 'promptTokens': promptTokens,
+      if (promptEvalMs != null) 'promptEvalMs': promptEvalMs,
+      if (evalMs != null) 'evalMs': evalMs,
+      'isExact': isExact,
     };
   }
 
@@ -86,6 +152,10 @@ class PerformanceMetrics {
       msPerToken: (json['msPerToken'] as num).toDouble(),
       startTime: DateTime.parse(json['startTime'] as String),
       endTime: DateTime.parse(json['endTime'] as String),
+      promptTokens: json['promptTokens'] as int?,
+      promptEvalMs: (json['promptEvalMs'] as num?)?.toDouble(),
+      evalMs: (json['evalMs'] as num?)?.toDouble(),
+      isExact: json['isExact'] as bool? ?? false,
     );
   }
 }

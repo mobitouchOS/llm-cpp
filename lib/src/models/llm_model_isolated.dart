@@ -5,10 +5,17 @@ import 'dart:isolate';
 
 import 'package:llamadart/llamadart.dart';
 
+import '../core/backend_perf.dart';
+import '../core/generation_event.dart';
 import '../core/llm_config.dart';
+import '../core/llm_errors.dart';
 import '../core/performance_metrics.dart';
 import '../core/streaming_result.dart';
 import 'llm_model_base.dart';
+
+/// How long [LlmModelIsolated.dispose] waits for the worker to confirm that
+/// llama.cpp released its native handles before the isolate is killed.
+const Duration _disposeTimeout = Duration(seconds: 5);
 
 // ── Worker Isolate entry point ─────────────────────────────────────────────
 
@@ -89,7 +96,7 @@ Future<void> _llamaIsolateWorkerMain(Map<String, dynamic> args) async {
       await engine.loadMultimodalProjector(mmprojPath);
     }
   } catch (e) {
-    mainPort.send({'type': 'error', 'message': '$e'});
+    mainPort.send({'type': 'error', ...encodeError(e)});
     return;
   }
 
@@ -133,22 +140,30 @@ Future<void> _llamaIsolateWorkerMain(Map<String, dynamic> args) async {
               )
             : LlamaChatMessage.fromText(role: LlamaChatRole.user, text: prompt);
 
+        String? finishReason;
+
         genSubscription = engine
             .create([msg], params: genParams)
             .listen(
               (chunk) {
-                final text = chunk.choices.firstOrNull?.delta.content;
+                final choice = chunk.choices.firstOrNull;
+                finishReason = choice?.finishReason ?? finishReason;
+                final text = choice?.delta.content;
                 if (text != null) {
                   streamPort.send({'type': 'token', 'text': text});
                 }
               },
-              onDone: () {
-                streamPort.send({'type': 'done'});
+              onDone: () async {
                 genSubscription = null;
+                streamPort.send({
+                  'type': 'done',
+                  if (finishReason != null) 'finishReason': finishReason,
+                  'perf': await readBackendPerf(engine),
+                });
               },
               onError: (Object e) {
-                streamPort.send({'type': 'error', 'message': '$e'});
                 genSubscription = null;
+                streamPort.send({'type': 'error', ...encodeError(e)});
               },
             );
 
@@ -158,8 +173,10 @@ Future<void> _llamaIsolateWorkerMain(Map<String, dynamic> args) async {
         engine.cancelGeneration();
 
       case 'dispose':
-        genSubscription?.cancel();
+        await genSubscription?.cancel();
+        genSubscription = null;
         await engine.dispose();
+        (message['replyPort'] as SendPort?)?.send({'type': 'disposed'});
         receivePort.close();
         return;
     }
@@ -232,18 +249,20 @@ class LlmModelIsolated extends LlmModelBase {
     if (initMsg['type'] == 'error') {
       _isolate?.kill();
       _isolate = null;
-      throw Exception('LlmModelIsolated init failed: ${initMsg['message']}');
+      throw decodeError(initMsg, context: 'LlmModelIsolated init failed');
     }
 
     _workerPort = initMsg['port'] as SendPort;
     markAsInitialized();
   }
 
-  // Bridges worker SendPort messages into a plain Stream<String>.
+  // Bridges worker SendPort messages into a stream of events. The terminal
+  // event carries the generation's finish reason and backend perf counters.
   // No generation tracking — callers manage isGenerating state.
-  Stream<String> _rawWorkerStream(Map<String, dynamic> message) {
-    final controller = StreamController<String>();
+  Stream<GenerationEvent> _rawWorkerStream(Map<String, dynamic> message) {
+    final controller = StreamController<GenerationEvent>();
     final replyPort = ReceivePort();
+    var finished = false;
 
     _workerPort!.send({...message, 'streamPort': replyPort.sendPort});
 
@@ -251,14 +270,29 @@ class LlmModelIsolated extends LlmModelBase {
       if (msg is! Map<String, dynamic>) return;
       switch (msg['type'] as String?) {
         case 'token':
-          if (!controller.isClosed) controller.add(msg['text'] as String);
+          if (!controller.isClosed) {
+            controller.add(GenerationEvent(text: msg['text'] as String));
+          }
         case 'done':
-          replyPort.close();
-          if (!controller.isClosed) controller.close();
-        case 'error':
+          finished = true;
           replyPort.close();
           if (!controller.isClosed) {
-            controller.addError(Exception('Worker error: ${msg['message']}'));
+            controller.add(
+              GenerationEvent(
+                text: '',
+                isFinal: true,
+                finishReason: msg['finishReason'] as String?,
+                perf: (msg['perf'] as Map?)?.cast<String, dynamic>(),
+              ),
+            );
+            controller.close();
+          }
+        case 'error':
+          finished = true;
+          replyPort.close();
+          if (!controller.isClosed) {
+            controller.addError(decodeError(msg, context: 'Worker error'));
+            controller.close();
           }
       }
     });
@@ -266,14 +300,17 @@ class LlmModelIsolated extends LlmModelBase {
     controller.onCancel = () {
       sub.cancel();
       replyPort.close();
-      _workerPort?.send({'type': 'cancel'});
+      // Only interrupt a generation that is still running: cancelGeneration()
+      // is engine-wide, so cancelling after a clean finish would abort an
+      // unrelated request when maxParallelSequences > 1.
+      if (!finished) _workerPort?.send({'type': 'cancel'});
     };
 
     return controller.stream;
   }
 
   // Wraps _rawWorkerStream with isGenerating tracking for sendPrompt().
-  Stream<String> _trackedStream(Map<String, dynamic> message) async* {
+  Stream<GenerationEvent> _trackedStream(Map<String, dynamic> message) async* {
     markGenerationStart();
     try {
       yield* _rawWorkerStream(message);
@@ -294,7 +331,9 @@ class LlmModelIsolated extends LlmModelBase {
   @override
   Stream<String> sendPrompt(String prompt, {List<LlamaImageContent>? images}) {
     checkInitialized();
-    return _trackedStream(_buildMessage(prompt, images: images));
+    return _trackedStream(
+      _buildMessage(prompt, images: images),
+    ).where((e) => !e.isFinal).map((e) => e.text);
   }
 
   @override
@@ -306,10 +345,10 @@ class LlmModelIsolated extends LlmModelBase {
     markGenerationStart();
     try {
       final buffer = StringBuffer();
-      await for (final token in _rawWorkerStream(
+      await for (final event in _rawWorkerStream(
         _buildMessage(prompt, images: images),
       )) {
-        buffer.write(token);
+        buffer.write(event.text);
       }
       return buffer.toString();
     } finally {
@@ -329,12 +368,27 @@ class LlmModelIsolated extends LlmModelBase {
 
     markGenerationStart();
     try {
-      await for (final token in _rawWorkerStream(
+      await for (final event in _rawWorkerStream(
         _buildMessage(prompt, images: images),
       )) {
+        if (event.isFinal) {
+          yield StreamingChunk(
+            text: '',
+            metrics: finalMetrics(
+              perf: event.perf,
+              fallbackTokenCount: totalTokenCount,
+              startTime: startTime,
+              endTime: DateTime.now(),
+            ),
+            isFinal: true,
+            finishReason: event.finishReason,
+          );
+          continue;
+        }
+
         totalTokenCount += 1;
         yield StreamingChunk(
-          text: token,
+          text: event.text,
           metrics: PerformanceMetrics.fromGeneration(
             tokenCount: totalTokenCount,
             startTime: startTime,
@@ -343,26 +397,33 @@ class LlmModelIsolated extends LlmModelBase {
           isFinal: false,
         );
       }
-      yield StreamingChunk(
-        text: '',
-        metrics: PerformanceMetrics.fromGeneration(
-          tokenCount: totalTokenCount,
-          startTime: startTime,
-          endTime: DateTime.now(),
-        ),
-        isFinal: true,
-      );
     } finally {
       markGenerationEnd();
     }
   }
 
   @override
-  void dispose() {
-    _workerPort?.send({'type': 'dispose'});
+  Future<void> dispose() async {
+    final workerPort = _workerPort;
+    _workerPort = null;
+
+    if (workerPort != null) {
+      // Wait for the worker to confirm llama.cpp released its handles before
+      // killing the isolate — killing mid-teardown races token release,
+      // worker shutdown and engine deletion.
+      final ackPort = ReceivePort();
+      workerPort.send({'type': 'dispose', 'replyPort': ackPort.sendPort});
+      try {
+        await ackPort.first.timeout(_disposeTimeout);
+      } catch (_) {
+        // A worker that is wedged or already gone must not block teardown.
+      } finally {
+        ackPort.close();
+      }
+    }
+
     _isolate?.kill(priority: Isolate.beforeNextEvent);
     _isolate = null;
-    _workerPort = null;
     markAsDisposed();
   }
 

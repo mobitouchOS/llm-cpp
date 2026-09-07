@@ -120,11 +120,15 @@ class RagEngine {
   }
 
   /// Releases the worker isolate and both loaded models.
+  ///
+  /// Awaiting this matters: the worker frees llama.cpp handles for both the
+  /// embedding and the generation model during teardown.
   /// Safe to call multiple times (idempotent).
-  void dispose() {
+  Future<void> dispose() async {
     if (!_isReady) return;
-    _coordinator?.dispose();
+    final coordinator = _coordinator;
     _coordinator = null;
+    await coordinator?.dispose();
     _vectorStore = null;
     _pipeline = null;
     _isReady = false;

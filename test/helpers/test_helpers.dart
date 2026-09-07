@@ -54,9 +54,9 @@ class TestHelpers {
   }
 
   /// Cleanup function for tests
-  static void cleanupModel(LlmModelBase model) {
+  static Future<void> cleanupModel(LlmModelBase model) async {
     if (model.isInitialized && !model.isDisposed) {
-      model.dispose();
+      await model.dispose();
     }
   }
 }
@@ -188,7 +188,7 @@ void main() {
       TestHelpers.cleanupModel(model);
     });
 
-    test('should validate model state', () {
+    test('should validate model state', () async {
       final model = TestHelpers.createTestStandardModel();
 
       TestHelpers.expectValidState(
@@ -197,7 +197,7 @@ void main() {
         shouldBeDisposed: false,
       );
 
-      model.dispose();
+      await model.dispose();
 
       TestHelpers.expectValidState(
         model,
@@ -253,9 +253,9 @@ void main() {
       TestHelpers.cleanupModel(model);
     });
 
-    test('should check destroyed state', () {
+    test('should check destroyed state', () async {
       final model = TestHelpers.createTestStandardModel();
-      model.dispose();
+      await model.dispose();
 
       expect(model.isInInitialState, false);
       expect(model.isReady, false);

@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:llamadart/llamadart.dart';
 
+import '../core/backend_perf.dart';
 import '../core/llm_config.dart';
 import '../core/performance_metrics.dart';
 import '../core/streaming_result.dart';
@@ -155,10 +156,15 @@ class LlmModelStandard extends LlmModelBase {
 
     markGenerationStart();
     try {
+      String? finishReason;
+
       await for (final chunk in _engine!.create([
         _buildMessage(prompt, images),
       ], params: _genParams)) {
-        final text = chunk.choices.firstOrNull?.delta.content;
+        final choice = chunk.choices.firstOrNull;
+        finishReason = choice?.finishReason ?? finishReason;
+
+        final text = choice?.delta.content;
         if (text == null) continue;
 
         totalTokenCount += 1;
@@ -176,12 +182,14 @@ class LlmModelStandard extends LlmModelBase {
 
       yield StreamingChunk(
         text: '',
-        metrics: PerformanceMetrics.fromGeneration(
-          tokenCount: totalTokenCount,
+        metrics: finalMetrics(
+          perf: await readBackendPerf(_engine!),
+          fallbackTokenCount: totalTokenCount,
           startTime: startTime,
           endTime: DateTime.now(),
         ),
         isFinal: true,
+        finishReason: finishReason,
       );
     } finally {
       markGenerationEnd();
@@ -189,9 +197,10 @@ class LlmModelStandard extends LlmModelBase {
   }
 
   @override
-  void dispose() {
-    _engine?.dispose();
+  Future<void> dispose() async {
+    final engine = _engine;
     _engine = null;
+    await engine?.dispose();
     markAsDisposed();
   }
 

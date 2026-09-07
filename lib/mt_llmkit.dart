@@ -8,7 +8,18 @@ export 'package:llamadart/llamadart.dart'
         LlamaContentPart,
         GpuBackend,
         LoraAdapterConfig,
-        GenerationGrammarTrigger;
+        GenerationGrammarTrigger,
+        // Exception hierarchy — model load, generation and teardown failures
+        // keep their llamadart type across the worker isolate boundary, so
+        // callers can tell "GPU backend failed, retry on CPU" apart from
+        // "model file is corrupt".
+        LlamaException,
+        LlamaModelException,
+        LlamaContextException,
+        LlamaInferenceException,
+        LlamaBackendInitializationException,
+        LlamaUnsupportedException,
+        LlamaStateException;
 
 // ── AI Chat providers (conversation-based) ───────────────────────────────────
 export 'src/api/ai_chat_provider.dart';

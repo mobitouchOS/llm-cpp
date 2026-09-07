@@ -129,7 +129,8 @@ class _LlmDemoPageState extends State<LlmDemoPage> {
   @override
   void dispose() {
     _streamSubscription?.cancel();
-    _ggufPlugin?.dispose();
+    // Widget teardown is synchronous; let the model release itself.
+    unawaited(_ggufPlugin?.dispose() ?? Future<void>.value());
     _promptController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -199,8 +200,9 @@ class _LlmDemoPageState extends State<LlmDemoPage> {
   }
 
   Future<bool> _initializeGguf() async {
-    _ggufPlugin?.dispose();
+    final previous = _ggufPlugin;
     _ggufPlugin = null;
+    await previous?.dispose();
 
     try {
       _ggufPlugin = LocalModel(
@@ -323,11 +325,12 @@ class _LlmDemoPageState extends State<LlmDemoPage> {
             ],
             selected: {_selectedProvider},
             onSelectionChanged: (selected) {
+              final previous = _ggufPlugin;
               setState(() {
                 _selectedProvider = selected.first;
-                _ggufPlugin?.dispose();
                 _ggufPlugin = null;
               });
+              unawaited(previous?.dispose() ?? Future<void>.value());
             },
           ),
         ),

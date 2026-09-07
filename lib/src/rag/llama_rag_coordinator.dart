@@ -13,11 +13,18 @@ import 'dart:isolate';
 
 import 'package:llamadart/llamadart.dart';
 
+import '../core/backend_perf.dart';
+import '../core/generation_event.dart';
 import '../core/llm_config.dart';
+import '../core/llm_errors.dart';
 import '../core/llm_interface.dart';
 import '../core/performance_metrics.dart';
 import '../core/streaming_result.dart';
 import 'embeddings/embedding_provider.dart';
+
+/// How long [LlamaRagCoordinator.dispose] waits for the worker to confirm that
+/// both engines released their native handles before the isolate is killed.
+const Duration _disposeTimeout = Duration(seconds: 5);
 
 // ── Worker isolate ────────────────────────────────────────────────────────────
 
@@ -91,7 +98,7 @@ Future<void> _llamaRagWorkerMain(Map<String, dynamic> args) async {
       ),
     );
   } catch (e) {
-    mainPort.send({'type': 'error', 'phase': 'embed_init', 'message': '$e'});
+    mainPort.send({'type': 'error', 'phase': 'embed_init', ...encodeError(e)});
     return;
   }
 
@@ -114,7 +121,7 @@ Future<void> _llamaRagWorkerMain(Map<String, dynamic> args) async {
     );
   } catch (e) {
     await embedEngine.dispose();
-    mainPort.send({'type': 'error', 'phase': 'gen_init', 'message': '$e'});
+    mainPort.send({'type': 'error', 'phase': 'gen_init', ...encodeError(e)});
     return;
   }
 
@@ -153,30 +160,38 @@ Future<void> _llamaRagWorkerMain(Map<String, dynamic> args) async {
           final embedding = await embedEngine.embed(text);
           replyPort.send({'type': 'ok', 'embedding': embedding});
         } catch (e) {
-          replyPort.send({'type': 'error', 'message': '$e'});
+          replyPort.send({'type': 'error', ...encodeError(e)});
         }
 
       case 'generate':
         final prompt = message['prompt'] as String;
         final streamPort = message['streamPort'] as SendPort;
+        String? finishReason;
+
         genSubscription = genEngine
             .create([
               LlamaChatMessage.fromText(role: LlamaChatRole.user, text: prompt),
             ], params: genParams)
             .listen(
               (chunk) {
-                final text = chunk.choices.firstOrNull?.delta.content;
+                final choice = chunk.choices.firstOrNull;
+                finishReason = choice?.finishReason ?? finishReason;
+                final text = choice?.delta.content;
                 if (text != null) {
                   streamPort.send({'type': 'token', 'text': text});
                 }
               },
-              onDone: () {
-                streamPort.send({'type': 'done'});
+              onDone: () async {
                 genSubscription = null;
+                streamPort.send({
+                  'type': 'done',
+                  if (finishReason != null) 'finishReason': finishReason,
+                  'perf': await readBackendPerf(genEngine),
+                });
               },
               onError: (Object e) {
-                streamPort.send({'type': 'error', 'message': '$e'});
                 genSubscription = null;
+                streamPort.send({'type': 'error', ...encodeError(e)});
               },
             );
 
@@ -186,9 +201,11 @@ Future<void> _llamaRagWorkerMain(Map<String, dynamic> args) async {
         genEngine.cancelGeneration();
 
       case 'dispose':
-        genSubscription?.cancel();
+        await genSubscription?.cancel();
+        genSubscription = null;
         await embedEngine.dispose();
         await genEngine.dispose();
+        (message['replyPort'] as SendPort?)?.send({'type': 'disposed'});
         receivePort.close();
         return;
     }
@@ -221,7 +238,7 @@ class _CoordEmbeddingProvider implements EmbeddingProvider {
     final response = await replyPort.first as Map<String, dynamic>;
     replyPort.close();
     if (response['type'] == 'error') {
-      throw Exception('Embedding error: ${response['message']}');
+      throw decodeError(response, context: 'Embedding error');
     }
     final raw = response['embedding'] as List;
     return raw.map((e) => (e as num).toDouble()).toList();
@@ -273,12 +290,22 @@ class _CoordPlugin implements LlmInterface {
   Future<void> loadModel(String localPath) async {}
 
   @override
-  Stream<String> sendPrompt(String prompt, {List<LlamaImageContent>? images}) {
+  Stream<String> sendPrompt(String prompt, {List<LlamaImageContent>? images}) =>
+      _events(
+        prompt,
+        images: images,
+      ).where((e) => !e.isFinal).map((e) => e.text);
+
+  Stream<GenerationEvent> _events(
+    String prompt, {
+    List<LlamaImageContent>? images,
+  }) {
     if (images != null && images.isNotEmpty) {
       throw UnsupportedError('Vision is not supported in the RAG pipeline.');
     }
-    final controller = StreamController<String>();
+    final controller = StreamController<GenerationEvent>();
     final replyPort = ReceivePort();
+    var finished = false;
 
     _workerPort.send({
       'type': 'generate',
@@ -291,18 +318,33 @@ class _CoordPlugin implements LlmInterface {
       if (message is! Map<String, dynamic>) return;
       switch (message['type'] as String?) {
         case 'token':
-          if (!controller.isClosed) controller.add(message['text'] as String);
+          if (!controller.isClosed) {
+            controller.add(GenerationEvent(text: message['text'] as String));
+          }
         case 'done':
+          finished = true;
           replyPort.close();
           _isGenerating = false;
-          if (!controller.isClosed) controller.close();
+          if (!controller.isClosed) {
+            controller.add(
+              GenerationEvent(
+                text: '',
+                isFinal: true,
+                finishReason: message['finishReason'] as String?,
+                perf: (message['perf'] as Map?)?.cast<String, dynamic>(),
+              ),
+            );
+            controller.close();
+          }
         case 'error':
+          finished = true;
           replyPort.close();
           _isGenerating = false;
           if (!controller.isClosed) {
             controller.addError(
-              Exception('Generation error: ${message['message']}'),
+              decodeError(message, context: 'Generation error'),
             );
+            controller.close();
           }
       }
     });
@@ -311,7 +353,7 @@ class _CoordPlugin implements LlmInterface {
       sub.cancel();
       replyPort.close();
       _isGenerating = false;
-      _workerPort.send({'type': 'stop_generate'});
+      if (!finished) _workerPort.send({'type': 'stop_generate'});
     };
 
     return controller.stream;
@@ -337,10 +379,25 @@ class _CoordPlugin implements LlmInterface {
     final startTime = DateTime.now();
     int totalTokenCount = 0;
 
-    await for (final token in sendPrompt(prompt, images: images)) {
+    await for (final event in _events(prompt, images: images)) {
+      if (event.isFinal) {
+        yield StreamingChunk(
+          text: '',
+          metrics: finalMetrics(
+            perf: event.perf,
+            fallbackTokenCount: totalTokenCount,
+            startTime: startTime,
+            endTime: DateTime.now(),
+          ),
+          isFinal: true,
+          finishReason: event.finishReason,
+        );
+        continue;
+      }
+
       totalTokenCount += 1;
       yield StreamingChunk(
-        text: token,
+        text: event.text,
         metrics: PerformanceMetrics.fromGeneration(
           tokenCount: totalTokenCount,
           startTime: startTime,
@@ -349,20 +406,10 @@ class _CoordPlugin implements LlmInterface {
         isFinal: false,
       );
     }
-
-    yield StreamingChunk(
-      text: '',
-      metrics: PerformanceMetrics.fromGeneration(
-        tokenCount: totalTokenCount,
-        startTime: startTime,
-        endTime: DateTime.now(),
-      ),
-      isFinal: true,
-    );
   }
 
   @override
-  void dispose() {}
+  Future<void> dispose() async {}
 
   @override
   void clean() {}
@@ -459,8 +506,9 @@ class LlamaRagCoordinator {
     if (initMsg['type'] == 'error') {
       _isolate?.kill();
       _isolate = null;
-      throw Exception(
-        'LlamaRagCoordinator init failed (${initMsg['phase']}): ${initMsg['message']}',
+      throw decodeError(
+        initMsg,
+        context: 'LlamaRagCoordinator init failed (${initMsg['phase']})',
       );
     }
 
@@ -481,10 +529,24 @@ class LlamaRagCoordinator {
   bool get isReady => _workerPort != null;
 
   Future<void> dispose() async {
-    _workerPort?.send({'type': 'dispose'});
-    await Future.delayed(const Duration(milliseconds: 200));
+    final workerPort = _workerPort;
+    _workerPort = null;
+
+    if (workerPort != null) {
+      // Wait for both engines to confirm teardown rather than guessing at a
+      // delay — killing the isolate mid-teardown races native handle release.
+      final ackPort = ReceivePort();
+      workerPort.send({'type': 'dispose', 'replyPort': ackPort.sendPort});
+      try {
+        await ackPort.first.timeout(_disposeTimeout);
+      } catch (_) {
+        // A wedged or already-gone worker must not block teardown.
+      } finally {
+        ackPort.close();
+      }
+    }
+
     _isolate?.kill(priority: Isolate.beforeNextEvent);
     _isolate = null;
-    _workerPort = null;
   }
 }

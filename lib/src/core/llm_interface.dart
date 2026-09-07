@@ -34,6 +34,11 @@ abstract interface class LlmInterface {
   /// Whether the model is loaded and ready for generation.
   bool get isInitialized;
 
-  void dispose();
+  /// Releases the model and any worker isolate backing it.
+  ///
+  /// Awaiting this matters: llama.cpp frees native handles during teardown,
+  /// and loading another model before that finishes races those handles.
+  Future<void> dispose();
+
   void clean();
 }

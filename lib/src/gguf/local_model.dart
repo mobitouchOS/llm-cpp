@@ -32,7 +32,9 @@ class LocalModel implements LlmInterface {
 
   @override
   Future<void> loadModel(String localPath) async {
-    _model?.dispose();
+    // Awaited: the previous model's native handles must be freed before the
+    // next one starts allocating.
+    await _model?.dispose();
     _model = backend == ModelBackend.isolate
         ? LlmModelIsolated(config)
         : LlmModelStandard(config);
@@ -40,9 +42,10 @@ class LocalModel implements LlmInterface {
   }
 
   @override
-  void dispose() {
-    _model?.dispose();
+  Future<void> dispose() async {
+    final model = _model;
     _model = null;
+    await model?.dispose();
   }
 
   @override

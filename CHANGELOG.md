@@ -1,7 +1,34 @@
 ## Unreleased
 
+### Fixed
+
+- Disposal no longer races llama.cpp teardown. `LlmModelIsolated`, `LlamaRagCoordinator` and
+  `LlamaEmbeddingProvider` used to send a `dispose` message and immediately kill the worker
+  isolate (or sleep 200 ms and hope), so `engine.dispose()` rarely finished. They now wait for
+  the worker's acknowledgement — with a 5 s timeout — before killing it.
+- Cancelling a stream after it finished no longer calls `cancelGeneration()`. That call is
+  engine-wide, so with `maxParallelSequences > 1` it could abort an unrelated generation.
+- llamadart's typed exceptions survive the worker isolate boundary instead of being flattened
+  into `Exception('$e')`. Callers can again tell `LlamaBackendInitializationException` ("GPU
+  backend failed, retry on CPU") from `LlamaModelException` ("model file is corrupt") or
+  `LlamaUnsupportedException`. The `LlamaException` hierarchy is now re-exported.
+
+### Added
+
+- `StreamingChunk.finishReason` (and the `isTruncated` shorthand): the final chunk now says
+  whether generation ended cleanly (`'stop'`) or ran out of token budget (`'length'`). These
+  were previously indistinguishable.
+- The final chunk's `PerformanceMetrics` now come from llama.cpp's own counters via
+  `LlamaEngine.getPerformanceContext()`, adding `promptTokens`, `promptEvalMs`, `evalMs` and an
+  `isExact` flag. Live metrics remain chunk-count estimates (`isExact == false`) — a chunk is
+  not a token once stream batching kicks in.
+
 ### Changed
 
+- **BREAKING (API):** `dispose()` returns `Future<void>` on `LlmInterface`, `LocalModel`,
+  `LlmModelIsolated`, `LlmModelStandard` and `RagEngine`, and must be awaited. `LocalModel.loadModel`
+  now awaits the previous model's teardown before loading the next one, instead of letting the
+  new model allocate while the old one's native handles were still being freed.
 - **BREAKING (iOS integration):** upgraded `llamadart` from `^0.6.10` to `^0.8.22` and raised the
   Flutter constraint to `>=3.38.0`. On iOS the llama.cpp runtime is now linked as an XCFramework
   through Swift Package Manager, so **apps must add `llamadart_llama_cpp_flutter: ^0.0.17` to their

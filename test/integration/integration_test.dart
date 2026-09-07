@@ -8,7 +8,7 @@ import 'package:mt_llmkit/src/models/llm_model_standard.dart';
 
 void main() {
   group('Integration Tests - Complete Workflow', () {
-    test('should create, configure and dispose standard model', () {
+    test('should create, configure and dispose standard model', () async {
       const config = LlmConfig(nGpuLayers: 32, nCtx: 4096, temp: 0.7);
 
       final model = LlmModelStandard(config);
@@ -16,12 +16,12 @@ void main() {
       expect(model.isInitialized, false);
       expect(model.isDisposed, false);
 
-      model.dispose();
+      await model.dispose();
 
       expect(model.isDisposed, true);
     });
 
-    test('should create, configure and dispose isolated model', () {
+    test('should create, configure and dispose isolated model', () async {
       const config = LlmConfig(nGpuLayers: 32, nCtx: 4096, temp: 0.7);
 
       final model = LlmModelIsolated(config);
@@ -29,26 +29,26 @@ void main() {
       expect(model.isInitialized, false);
       expect(model.isDisposed, false);
 
-      model.dispose();
+      await model.dispose();
 
       expect(model.isDisposed, true);
     });
 
-    test('should handle multiple models simultaneously', () {
+    test('should handle multiple models simultaneously', () async {
       final model1 = LlmModelStandard(const LlmConfig());
       final model2 = LlmModelIsolated(const LlmConfig());
 
       expect(model1.isInitialized, false);
       expect(model2.isInitialized, false);
 
-      model1.dispose();
-      model2.dispose();
+      await model1.dispose();
+      await model2.dispose();
 
       expect(model1.isDisposed, true);
       expect(model2.isDisposed, true);
     });
 
-    test('should work with different configs', () {
+    test('should work with different configs', () async {
       final models = [
         LlmModelStandard(const LlmConfig()),
         LlmModelStandard(const LlmConfig(nGpuLayers: 0, temp: 0.5)),
@@ -61,12 +61,12 @@ void main() {
       for (final model in models) {
         expect(model, isNotNull);
         expect(model.isInitialized, false);
-        model.dispose();
+        await model.dispose();
         expect(model.isDisposed, true);
       }
     });
 
-    test('should respect configuration parameters', () {
+    test('should respect configuration parameters', () async {
       const lowResource = LlmConfig(
         nGpuLayers: 0,
         nCtx: 512,
@@ -87,8 +87,8 @@ void main() {
       expect(lowModel, isNotNull);
       expect(highModel, isNotNull);
 
-      lowModel.dispose();
-      highModel.dispose();
+      await lowModel.dispose();
+      await highModel.dispose();
     });
   });
 
@@ -102,9 +102,9 @@ void main() {
       );
     });
 
-    test('should prevent operations on disposed model', () {
+    test('should prevent operations on disposed model', () async {
       final model = LlmModelStandard(const LlmConfig());
-      model.dispose();
+      await model.dispose();
 
       expect(() => model.loadModel('/test.gguf'), throwsStateError);
       expect(() => model.sendPrompt('test'), throwsStateError);
@@ -136,7 +136,7 @@ void main() {
       expect(isolated, isA<LlmModelBase>());
     });
 
-    test('all models should have consistent state management', () {
+    test('all models should have consistent state management', () async {
       final models = <LlmModelBase>[
         LlmModelStandard(const LlmConfig()),
         LlmModelIsolated(const LlmConfig()),
@@ -148,7 +148,7 @@ void main() {
         expect(model.isDisposed, false);
 
         // After dispose
-        model.dispose();
+        await model.dispose();
         expect(model.isInitialized, false);
         expect(model.isDisposed, true);
       }
@@ -156,15 +156,15 @@ void main() {
   });
 
   group('Integration Tests - Configuration Variations', () {
-    test('should work with minimal configuration', () {
+    test('should work with minimal configuration', () async {
       const config = LlmConfig(nCtx: 128, nBatch: 32, nThreads: 1);
 
       final model = LlmModelStandard(config);
       expect(model, isNotNull);
-      model.dispose();
+      await model.dispose();
     });
 
-    test('should work with maximum configuration', () {
+    test('should work with maximum configuration', () async {
       const config = LlmConfig(
         nGpuLayers: 99,
         nCtx: 32768,
@@ -179,10 +179,10 @@ void main() {
 
       final model = LlmModelStandard(config);
       expect(model, isNotNull);
-      model.dispose();
+      await model.dispose();
     });
 
-    test('should handle edge case values', () {
+    test('should handle edge case values', () async {
       const config = LlmConfig(
         nGpuLayers: 0,
         nCtx: 1,
@@ -197,7 +197,7 @@ void main() {
 
       final model = LlmModelStandard(config);
       expect(model, isNotNull);
-      model.dispose();
+      await model.dispose();
     });
   });
 }

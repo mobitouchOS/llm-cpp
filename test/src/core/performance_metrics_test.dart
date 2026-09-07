@@ -130,4 +130,71 @@ void main() {
       expect(metrics.msPerToken, 200.0); // 10000ms / 50 tokens
     });
   });
+
+  group('PerformanceMetrics.fromBackendPerf', () {
+    final startTime = DateTime(2024, 1, 1, 12, 0, 0);
+    final endTime = DateTime(2024, 1, 1, 12, 0, 10);
+
+    test('uses the backend decode time, not wall clock, for throughput', () {
+      final metrics = PerformanceMetrics.fromBackendPerf(
+        evalTokens: 100,
+        startTime: startTime,
+        endTime: endTime,
+        promptTokens: 512,
+        promptEvalMs: 8000,
+        evalMs: 2000,
+      );
+
+      // 100 tokens in 2s of decoding, even though 10s of wall clock elapsed
+      // (8s of it spent ingesting the prompt).
+      expect(metrics.tokensPerSecond, 50.0);
+      expect(metrics.msPerToken, 20.0);
+      expect(metrics.durationMs, 10000);
+      expect(metrics.promptTokens, 512);
+      expect(metrics.isExact, isTrue);
+    });
+
+    test(
+      'falls back to wall clock when the backend reports no decode time',
+      () {
+        final metrics = PerformanceMetrics.fromBackendPerf(
+          evalTokens: 100,
+          startTime: startTime,
+          endTime: endTime,
+        );
+
+        expect(metrics.tokensPerSecond, 10.0);
+        expect(metrics.isExact, isTrue);
+      },
+    );
+
+    test('marks chunk-count estimates as inexact', () {
+      final metrics = PerformanceMetrics.fromGeneration(
+        tokenCount: 100,
+        startTime: startTime,
+        endTime: endTime,
+      );
+
+      expect(metrics.isExact, isFalse);
+      expect(metrics.promptTokens, isNull);
+    });
+
+    test('round-trips the backend fields through JSON', () {
+      final metrics = PerformanceMetrics.fromBackendPerf(
+        evalTokens: 100,
+        startTime: startTime,
+        endTime: endTime,
+        promptTokens: 512,
+        promptEvalMs: 8000,
+        evalMs: 2000,
+      );
+
+      final restored = PerformanceMetrics.fromJson(metrics.toJson());
+
+      expect(restored.promptTokens, 512);
+      expect(restored.promptEvalMs, 8000);
+      expect(restored.evalMs, 2000);
+      expect(restored.isExact, isTrue);
+    });
+  });
 }

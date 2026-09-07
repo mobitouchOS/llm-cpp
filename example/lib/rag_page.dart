@@ -108,7 +108,8 @@ class _RagPageState extends State<RagPage> {
   @override
   void dispose() {
     _querySubscription?.cancel();
-    _rag?.dispose();
+    // Widget teardown is synchronous; let the engine release itself.
+    unawaited(_rag?.dispose() ?? Future<void>.value());
     _queryController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -249,7 +250,7 @@ class _RagPageState extends State<RagPage> {
         _showSnack('Index loaded: ${rag.indexedSize} chunks');
       }
     } catch (e) {
-      rag.dispose();
+      await rag.dispose();
       _showError('Pipeline initialization error: $e');
     }
   }

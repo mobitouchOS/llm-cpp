@@ -93,7 +93,8 @@ class _VisionPageState extends State<VisionPage> {
   @override
   void dispose() {
     _subscription?.cancel();
-    _plugin?.dispose();
+    // Widget teardown is synchronous; let the model release itself.
+    unawaited(_plugin?.dispose() ?? Future<void>.value());
     _promptController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -160,6 +161,12 @@ class _VisionPageState extends State<VisionPage> {
         }
         await sink.close();
 
+        // Invalidate the loaded plugin when a model changes — awaited so the
+        // old model's native handles are freed before the next load.
+        final previous = _plugin;
+        _plugin = null;
+        await previous?.dispose();
+
         setState(() {
           if (isMainModel) {
             _modelPath = filePath;
@@ -170,9 +177,6 @@ class _VisionPageState extends State<VisionPage> {
             _mmprojReady = true;
             _isDownloadingMmproj = false;
           }
-          // Invalidate the loaded plugin when a model changes.
-          _plugin?.dispose();
-          _plugin = null;
         });
       } else {
         throw HttpException('HTTP ${response.statusCode}');
@@ -206,7 +210,9 @@ class _VisionPageState extends State<VisionPage> {
 
   Future<bool> _ensurePlugin() async {
     if (_plugin != null && _plugin!.isInitialized) return true;
-    _plugin?.dispose();
+    final previous = _plugin;
+    _plugin = null;
+    await previous?.dispose();
     try {
       _plugin = LocalModel(
         config: LlmConfig(

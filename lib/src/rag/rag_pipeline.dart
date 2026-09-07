@@ -263,6 +263,6 @@ class RagPipeline {
   /// (and persisted to disk if autoSavePath was set).
   Future<void> dispose() async {
     await embeddingProvider.dispose();
-    generationPlugin.dispose();
+    await generationPlugin.dispose();
   }
 }

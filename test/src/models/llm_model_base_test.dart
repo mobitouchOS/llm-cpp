@@ -77,7 +77,7 @@ class MockLlmModel extends LlmModelBase {
   }
 
   @override
-  void dispose() {
+  Future<void> dispose() async {
     _disposeCalled = true;
     markAsDisposed();
   }
@@ -113,7 +113,7 @@ void main() {
 
     test('should mark as disposed after dispose', () async {
       await model.loadModel('/test/path');
-      model.dispose();
+      await model.dispose();
 
       expect(model.isInitialized, false);
       expect(model.isDisposed, true);
@@ -160,21 +160,21 @@ void main() {
 
     test('should throw StateError when loading after dispose', () async {
       await model.loadModel('/test/path');
-      model.dispose();
+      await model.dispose();
 
       expect(() => model.loadModel('/test/path2'), throwsStateError);
     });
 
     test('should throw StateError when sending prompt after dispose', () async {
       await model.loadModel('/test/path');
-      model.dispose();
+      await model.dispose();
 
       expect(() => model.sendPrompt('test'), throwsStateError);
     });
 
     test('should throw StateError when cleaning after dispose', () async {
       await model.loadModel('/test/path');
-      model.dispose();
+      await model.dispose();
 
       expect(() => model.clean(), throwsStateError);
     });
@@ -192,7 +192,7 @@ void main() {
       final stream2 = model.sendPrompt('prompt2');
       await stream2.first;
 
-      model.dispose();
+      await model.dispose();
       expect(model.isDisposed, true);
     });
   });

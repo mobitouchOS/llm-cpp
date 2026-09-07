@@ -6,7 +6,12 @@ import 'dart:isolate';
 
 import 'package:llamadart/llamadart.dart';
 
+import '../../core/llm_errors.dart';
 import 'embedding_provider.dart';
+
+/// How long [LlamaEmbeddingProvider.dispose] waits for the worker to confirm
+/// that llama.cpp released its native handles before the isolate is killed.
+const Duration _disposeTimeout = Duration(seconds: 5);
 
 // ── Worker isolate entry point ─────────────────────────────────────────────
 
@@ -30,7 +35,7 @@ Future<void> _llamaEmbedWorkerMain(Map<String, dynamic> args) async {
       ),
     );
   } catch (e) {
-    mainPort.send({'type': 'error', 'message': '$e'});
+    mainPort.send({'type': 'error', ...encodeError(e)});
     return;
   }
 
@@ -48,11 +53,12 @@ Future<void> _llamaEmbedWorkerMain(Map<String, dynamic> args) async {
           final embedding = await engine.embed(text);
           replyPort.send({'type': 'ok', 'embedding': embedding});
         } catch (e) {
-          replyPort.send({'type': 'error', 'message': '$e'});
+          replyPort.send({'type': 'error', ...encodeError(e)});
         }
 
       case 'dispose':
         await engine.dispose();
+        (message['replyPort'] as SendPort?)?.send({'type': 'disposed'});
         receivePort.close();
         return;
     }
@@ -141,9 +147,7 @@ class LlamaEmbeddingProvider implements EmbeddingProvider {
     if (initMsg['type'] == 'error') {
       _isolate?.kill();
       _isolate = null;
-      throw Exception(
-        'LlamaEmbeddingProvider init failed: ${initMsg['message']}',
-      );
+      throw decodeError(initMsg, context: 'LlamaEmbeddingProvider init failed');
     }
 
     _workerPort = initMsg['port'] as SendPort;
@@ -173,7 +177,7 @@ class LlamaEmbeddingProvider implements EmbeddingProvider {
     replyPort.close();
 
     if (response['type'] == 'error') {
-      throw Exception('Embedding error: ${response['message']}');
+      throw decodeError(response, context: 'Embedding error');
     }
 
     final raw = response['embedding'] as List;
@@ -191,11 +195,25 @@ class LlamaEmbeddingProvider implements EmbeddingProvider {
 
   @override
   Future<void> dispose() async {
-    _workerPort?.send({'type': 'dispose'});
-    await Future.delayed(const Duration(milliseconds: 200));
+    final workerPort = _workerPort;
+    _workerPort = null;
+
+    if (workerPort != null) {
+      // Wait for the worker's confirmation rather than guessing at a delay —
+      // killing the isolate mid-teardown races native handle release.
+      final ackPort = ReceivePort();
+      workerPort.send({'type': 'dispose', 'replyPort': ackPort.sendPort});
+      try {
+        await ackPort.first.timeout(_disposeTimeout);
+      } catch (_) {
+        // A wedged or already-gone worker must not block teardown.
+      } finally {
+        ackPort.close();
+      }
+    }
+
     _isolate?.kill(priority: Isolate.beforeNextEvent);
     _isolate = null;
-    _workerPort = null;
     _isInitialized = false;
     _dimensions = 0;
   }

@@ -12,10 +12,10 @@ void main() {
       expect(LlmInterface, isNotNull);
     });
 
-    test('should export LocalModel', () {
+    test('should export LocalModel', () async {
       final model = LocalModel();
       expect(model, isNotNull);
-      model.dispose();
+      await model.dispose();
     });
 
     test('should export ModelBackend', () {

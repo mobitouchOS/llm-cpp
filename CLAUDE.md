@@ -58,7 +58,9 @@ LlmInterface (abstract interface)               ← lib/src/core/llm_interface.d
 
 All three accept an optional `images` parameter for vision models.
 
-`StreamingChunk` carries: `text`, `metrics` (`PerformanceMetrics`), and `isFinal` flag.
+`StreamingChunk` carries: `text`, `metrics` (`PerformanceMetrics`), an `isFinal` flag, and
+`finishReason` (set on the final chunk — `'stop'` vs `'length'`; `isTruncated` is the shorthand
+for hitting the `nPredict` budget).
 
 ### Configuration
 
@@ -81,13 +83,41 @@ All three accept an optional `images` parameter for vision models.
 
 Override the model's built-in chat template via `LlmConfig.chatTemplate` (a raw Jinja/GGUF template string). When `null` the model file's embedded template is used automatically — no manual format selection required.
 
-### System message support
+### System messages
 
-`LlmModelIsolated` decodes `\x01SYS\x01`/`\x01USR\x01` markers in `sendPrompt*` calls to pass proper `[system, user]` messages to the underlying engine. `RagPipeline` uses this to inject the RAG system prompt.
+Not supported yet. Every generation path builds a single `LlamaChatMessage` with
+`LlamaChatRole.user`, so instructions have to be prepended to the user string —
+which is at odds with the model's chat template. `RagPipeline` interpolates its system
+prompt into the user content for the same reason.
 
 ### Performance Metrics
 
-`PerformanceMetrics` (`lib/src/core/performance_metrics.dart`) tracks `tokensGenerated`, `durationMs`, `tokensPerSecond`, `msPerToken`. Counts are exact: each llamadart callback emits one token, incremented via `+= 1` in the streaming loop.
+`PerformanceMetrics` (`lib/src/core/performance_metrics.dart`) tracks `tokensGenerated`,
+`durationMs`, `tokensPerSecond`, `msPerToken`, plus `promptTokens`, `promptEvalMs`, `evalMs`
+and an `isExact` flag.
+
+Metrics emitted **while streaming** are estimates (`isExact == false`): they count stream
+chunks, and llamadart batches chunks according to `streamBatchTokenThreshold` /
+`streamBatchByteThreshold`, so a chunk is not necessarily a token. The **final** chunk carries
+llama.cpp's own counters, read through `LlamaEngine.getPerformanceContext()` — see
+`lib/src/core/backend_perf.dart`. `tokensPerSecond` is then decode throughput and excludes
+prompt ingestion.
+
+### Errors
+
+llamadart's typed exceptions survive the worker isolate boundary: workers encode them with
+`encodeError` and the main isolate rebuilds the same class with `decodeError`
+(`lib/src/core/llm_errors.dart`). So `LlamaBackendInitializationException` ("GPU backend
+failed, retry on CPU") stays distinguishable from `LlamaModelException` ("model file is
+corrupt") and `LlamaUnsupportedException` (e.g. aLoRA adapters, hard-failing since llamadart
+0.8.22). The hierarchy is re-exported from `lib/mt_llmkit.dart`.
+
+### Teardown
+
+`dispose()` is `Future<void>` everywhere (`LlmInterface`, `LocalModel`, both backends,
+`RagEngine`) and **must be awaited**. Isolate-backed implementations wait for the worker to
+acknowledge that llama.cpp released its native handles (5 s timeout) before killing the
+isolate; `LocalModel.loadModel` awaits the previous model's teardown before loading the next.
 
 ### Cloud AI Providers
 

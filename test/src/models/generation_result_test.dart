@@ -31,6 +31,15 @@ class _ScriptedModel extends LlmModelBase {
 
   // ── Not exercised here ───────────────────────────────────────────────────
   @override
+  Future<Conversation> startConversation({
+    String? systemPrompt,
+    int? maxContextTokens,
+    List<LlmChatMessage>? history,
+    ContextOverflowPolicy overflowPolicy = ContextOverflowPolicy.allow,
+    bool keepThinkingInHistory = false,
+  }) async => throw UnsupportedError('no session');
+
+  @override
   Future<void> loadModel(String localPath) async {}
   @override
   Stream<String> sendPrompt(

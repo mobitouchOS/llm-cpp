@@ -18,8 +18,10 @@ A Flutter plugin for running Large Language Models (LLMs) locally on Android and
 2. [Local LLM Inference (GGUF)](#local-llm-inference-gguf)
    - [Quick start](#quick-start)
    - [Backends](#backends)
+   - [Model lifecycle](#model-lifecycle)
    - [Configuration](#configuration)
    - [Generation methods](#generation-methods)
+   - [Conversations](#conversations)
    - [Prompt format](#prompt-format)
    - [Performance metrics](#performance-metrics)
 3. [Vision (Multimodal)](#vision-multimodal)
@@ -199,6 +201,8 @@ Three methods are available on `LocalModel` (and any `LlmInterface` implementati
 | `sendPrompt(prompt)` | `Stream<String>` | Raw token stream. Lowest overhead. |
 | `sendPromptComplete(prompt)` | `Future<String>` | Waits for the full response and returns it as a single string. |
 | `sendPromptStream(prompt)` | `Stream<StreamingChunk>` | **Recommended.** Token stream with live performance metrics. |
+| `sendPromptResult(prompt)` | `Future<GenerationResult>` | Everything the generation produced: text, reasoning, tool calls, finish reason, metrics. |
+| `sendPromptStructured(prompt, output:)` | `Future<LlmStructuredResult<T>>` | JSON constrained to a schema, decoded into `T`. |
 
 ```dart
 // 1. Raw token stream
@@ -224,10 +228,102 @@ model.sendPromptStream('Hello').listen((chunk) {
 | Field | Type | Description |
 |---|---|---|
 | `text` | `String` | The generated text fragment. |
+| `thinking` | `String?` | Reasoning, on its own chunks. Never mixed into `text`. |
 | `isFinal` | `bool` | `true` on the last chunk of the response. |
-| `metrics` | `PerformanceMetrics?` | Available on every chunk; most useful on the final one. |
+| `finishReason` | `String?` | Final chunk only: `'stop'` or `'length'`. `isTruncated` is the shorthand. |
+| `toolCalls` | `List<LlmToolCall>` | Final chunk only, when tools were declared. |
+| `metrics` | `PerformanceMetrics?` | Available on every chunk; exact on the final one (`isExact`). |
 
-`PerformanceMetrics` fields: `tokensGenerated`, `durationMs`, `tokensPerSecond`, `msPerToken`.
+`PerformanceMetrics` fields: `tokensGenerated`, `durationMs`, `tokensPerSecond`, `msPerToken`,
+`promptTokens`, `promptEvalMs`, `evalMs`, `isExact`.
+
+### Conversations
+
+`sendPrompt*` is stateless — every call is a fresh exchange. For a chat, open a conversation:
+
+```dart
+final chat = await model.startConversation(
+  systemPrompt: 'You are a concise assistant.',
+);
+
+await for (final chunk in chat.send('What is the capital of Poland?')) {
+  stdout.write(chunk.text);
+}
+
+// The model sees the previous turn.
+final follow = await chat.sendComplete('And its population?');
+print(follow.text);
+
+await chat.close();
+```
+
+History lives with the model and is trimmed as it approaches the context window. That trim is
+**permanent** — the oldest turns are gone — so it is reported rather than silent:
+
+```dart
+chat.trims.listen((event) {
+  print('Dropped ${event.dropped.length} older messages to make room.');
+});
+```
+
+Pass `overflowPolicy: ContextOverflowPolicy.fail` to get a `LlmContextOverflowException` instead
+of an answer built on a prompt the model could not fully see.
+
+`chat.history()` returns `List<LlmChatMessage>` (JSON-serializable) and `chat.restore(...)` puts
+it back, so a conversation can be persisted and resumed.
+
+#### Tool calling
+
+```dart
+final tools = [
+  const LlmTool(
+    name: 'get_weather',
+    description: 'Current weather for a city',
+    parameters: [],
+  ),
+];
+
+var turn = await chat.sendComplete(
+  'What is the weather in Kraków?',
+  overrides: GenerationOverrides(tools: tools),
+);
+
+while (turn.needsToolResults) {
+  final results = [
+    for (final call in turn.toolCalls)
+      ToolResult.forCall(call, await runTool(call)),
+  ];
+  turn = await chat.submitToolResultsComplete(results);
+}
+
+print(turn.text);
+```
+
+Tools are declarations only — `LlmTool` carries no handler. Generation runs in a worker isolate,
+so your tool code runs where your app's state and plugins actually are.
+
+#### Structured output
+
+```dart
+final output = LlmStructuredOutput.jsonSchema(
+  schema: {
+    'type': 'object',
+    'properties': {'city': {'type': 'string'}},
+    'required': ['city'],
+  },
+  decoder: (json) => json['city'] as String,
+);
+
+final result = await model.sendPromptStructured(
+  'Which city is the capital of Poland?',
+  output: output,
+);
+print(result.value);
+```
+
+The schema constrains decoding, so the model cannot emit anything that would not parse. A schema
+llamadart cannot turn into a grammar is rejected when you build the `LlmStructuredOutput`, not
+mid-generation.
 
 ### Prompt format
 

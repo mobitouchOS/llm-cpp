@@ -133,6 +133,36 @@ void main() {
       },
     );
 
+    test('conversation history survives the isolate boundary', () async {
+      // The session lives in the worker, so history and turn requests cross
+      // the port as objects rather than hand-rolled maps.
+      final messages = <LlmChatMessage>[
+        const LlmChatMessage.user('question'),
+        LlmChatMessage.assistant(
+          'reply',
+          thinking: 'reasoning',
+          toolCalls: const [
+            LlmToolCall(index: 0, id: 'c1', name: 'search', arguments: '{}'),
+          ],
+        ),
+        LlmChatMessage.tool(
+          const ToolResult(name: 'search', result: 'found', id: 'c1'),
+        ),
+        LlmChatMessage.user(
+          'look at this',
+          attachments: [LlamaImageContent(path: '/tmp/cat.png')],
+        ),
+      ];
+
+      final restored = (await _roundTrip(messages) as List)
+          .cast<LlmChatMessage>();
+
+      expect(restored[1].thinking, 'reasoning');
+      expect(restored[1].toolCalls.single.name, 'search');
+      expect(restored[2].toolResult?.result, 'found');
+      expect(restored[3].attachments.single, isA<LlamaImageContent>());
+    });
+
     test('attachments survive the isolate boundary', () async {
       final attachments = <LlamaContentPart>[
         LlamaImageContent(path: '/tmp/cat.png'),

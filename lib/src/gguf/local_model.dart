@@ -2,6 +2,9 @@
 
 import 'package:llamadart/llamadart.dart' show LlamaContentPart;
 
+import '../core/chat_message.dart';
+import '../core/conversation.dart';
+import '../core/conversation_types.dart';
 import '../core/generation_overrides.dart';
 import '../core/generation_result.dart';
 import '../core/llm_config.dart';
@@ -113,6 +116,40 @@ class LocalModel implements LlmInterface {
       systemPrompt: systemPrompt,
       attachments: attachments,
       overrides: overrides,
+    );
+  }
+
+  // ── Conversations ────────────────────────────────────────────────────────
+
+  /// Opens a multi-turn conversation on the loaded model.
+  ///
+  /// Unlike the one-shot `sendPrompt*` methods, a [Conversation] keeps history,
+  /// so the model sees the whole exchange and follow-up questions work without
+  /// the app concatenating prompts by hand. It is also the only way to answer
+  /// tool calls and continue.
+  ///
+  /// History lives with the engine and is trimmed as it approaches the context
+  /// window — `Conversation.trims` reports what was permanently dropped, and
+  /// [overflowPolicy] decides whether a prompt that still does not fit is sent
+  /// anyway or fails.
+  ///
+  /// [keepThinkingInHistory] re-sends the model's reasoning on later turns.
+  /// Off by default: whether a model's chat template renders it at all is
+  /// model-dependent, and it costs context on every turn.
+  Future<Conversation> startConversation({
+    String? systemPrompt,
+    int? maxContextTokens,
+    List<LlmChatMessage>? history,
+    ContextOverflowPolicy overflowPolicy = ContextOverflowPolicy.allow,
+    bool keepThinkingInHistory = false,
+  }) {
+    _ensureInitialized();
+    return _model!.startConversation(
+      systemPrompt: systemPrompt,
+      maxContextTokens: maxContextTokens,
+      history: history,
+      overflowPolicy: overflowPolicy,
+      keepThinkingInHistory: keepThinkingInHistory,
     );
   }
 

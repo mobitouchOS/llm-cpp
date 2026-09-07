@@ -33,6 +33,15 @@
   llama.cpp backend alive, so the next `loadModel` skips isolate spawn and backend
   initialization. `LocalModel.loadModel` now swaps the model inside the live worker instead of
   tearing it down and respawning — switching models was the expensive path.
+- **Multi-turn conversations.** `LocalModel.startConversation()` returns a `Conversation` that
+  keeps history, so follow-up questions work without the app concatenating prompts by hand, and
+  the tool loop can finally be closed: tool calls come back, `submitToolResults` answers them and
+  the model continues. The one-shot `sendPrompt*` methods stay stateless.
+  Context trimming is reported rather than silent — llamadart permanently deletes the oldest
+  turns to make a prompt fit, and `Conversation.trims` plus `ConversationChunk.dropped` say what
+  went; `ContextOverflowPolicy.fail` refuses to answer from a prompt that still did not fit.
+  Cancelling a turn keeps history coherent, history can be read back and restored
+  (`LlmChatMessage`), and reasoning is kept out of later turns unless asked for.
 - **`sendPromptResult`** returns everything a generation produced —
   `GenerationResult{text, thinking, toolCalls, finishReason, metrics, thinkingTruncated,
   thinkingTokens}`. `sendPromptComplete` returns only the text, so on a reasoning model it

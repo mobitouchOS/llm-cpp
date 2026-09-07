@@ -5,11 +5,15 @@ import 'dart:io';
 import 'package:llamadart/llamadart.dart';
 
 import '../core/backend_perf.dart';
+import '../core/chat_message.dart';
+import '../core/conversation.dart';
+import '../core/conversation_types.dart';
 import '../core/engine_rpc.dart';
 import '../core/generation_overrides.dart';
 import '../core/llm_config.dart';
 import '../core/model_diagnostics.dart';
 import '../core/model_params_builder.dart';
+import '../core/session_ops.dart';
 import '../core/performance_metrics.dart';
 import '../core/streaming_result.dart';
 import '../core/tools.dart';
@@ -24,6 +28,50 @@ class LlmModelStandard extends LlmModelBase {
   // runs with `reusePromptPrefix: false`, which clears context memory and the
   // cached prompt tokens before ingesting. See [clean].
   bool _pendingPrefixInvalidation = false;
+
+  SessionRegistry? _sessions;
+  int _nextSessionId = 0;
+
+  // Conversation turns and one-shot prompts share this queue: llama.cpp chat
+  // generation runs on one context, so they cannot overlap.
+  Future<void> _turnQueue = Future<void>.value();
+
+  SessionRegistry get _registry => _sessions ??= SessionRegistry(
+    createSession: (options) => RealChatSession(
+      ChatSession(
+        _engine!,
+        maxContextTokens: options.maxContextTokens,
+        systemPrompt: options.systemPrompt,
+      ),
+    ),
+    baseParams: () => buildGenerationParams(config),
+    enableThinkingDefault: () => config.enableThinkingDefault,
+    readPerf: () => readBackendPerf(_engine!),
+    serialize: (action) => _turnQueue = _turnQueue.then((_) => action()),
+  );
+
+  @override
+  Future<Conversation> startConversation({
+    String? systemPrompt,
+    int? maxContextTokens,
+    List<LlmChatMessage>? history,
+    ContextOverflowPolicy overflowPolicy = ContextOverflowPolicy.allow,
+    bool keepThinkingInHistory = false,
+  }) async {
+    checkInitialized();
+    final id = 's${_nextSessionId++}';
+    _registry.open(
+      id,
+      SessionOptions(
+        systemPrompt: systemPrompt,
+        maxContextTokens: maxContextTokens,
+        overflowPolicy: overflowPolicy,
+        keepThinkingInHistory: keepThinkingInHistory,
+      ),
+      history: history,
+    );
+    return Conversation(id, LocalConversationTransport(_registry));
+  }
 
   LlmModelStandard(this.config);
 
@@ -82,6 +130,7 @@ class LlmModelStandard extends LlmModelBase {
     checkNotDisposed();
     final engine = _engine;
     if (engine == null || !engine.isReady) return;
+    _sessions?.closeAll();
     await engine.unloadModel();
     _pendingPrefixInvalidation = false;
     markAsUnloaded();
@@ -91,6 +140,7 @@ class LlmModelStandard extends LlmModelBase {
   Future<void> clean({bool resetConversations = true}) async {
     checkInitialized();
     _pendingPrefixInvalidation = true;
+    if (resetConversations) _sessions?.resetAll();
   }
 
   @override
@@ -253,6 +303,7 @@ class LlmModelStandard extends LlmModelBase {
 
   @override
   Future<void> dispose() async {
+    _sessions?.closeAll();
     final engine = _engine;
     _engine = null;
     await engine?.dispose();

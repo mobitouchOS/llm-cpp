@@ -1,5 +1,6 @@
 // lib/src/core/generation_event.dart
 
+import 'chat_message.dart';
 import 'tools.dart';
 
 /// One message from a worker isolate: either a token, or the terminal event
@@ -20,6 +21,14 @@ class GenerationEvent {
   /// Completed tool calls, on the terminal event only.
   final List<LlmToolCall> toolCalls;
 
+  /// Conversation turns only: whether the prompt fitted the context window
+  /// after trimming.
+  final bool fitContext;
+
+  /// Conversation turns only: history permanently deleted to make the prompt
+  /// fit.
+  final List<LlmChatMessage> dropped;
+
   const GenerationEvent({
     required this.text,
     this.thinking,
@@ -27,5 +36,7 @@ class GenerationEvent {
     this.finishReason,
     this.perf,
     this.toolCalls = const [],
+    this.fitContext = true,
+    this.dropped = const [],
   });
 }

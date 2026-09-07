@@ -42,6 +42,9 @@ export 'src/api/mistral_chat_provider.dart';
 export 'src/api/openai_chat_provider.dart';
 
 // ── Core ─────────────────────────────────────────────────────────────────────
+export 'src/core/chat_message.dart';
+export 'src/core/conversation.dart' show Conversation;
+export 'src/core/conversation_types.dart';
 export 'src/core/generation_overrides.dart';
 export 'src/core/generation_result.dart';
 export 'src/core/llm_config.dart';

@@ -6,6 +6,9 @@ import 'dart:isolate';
 import 'package:llamadart/llamadart.dart';
 
 import '../core/backend_perf.dart';
+import '../core/chat_message.dart';
+import '../core/conversation.dart';
+import '../core/conversation_types.dart';
 import '../core/generation_event.dart';
 import '../core/generation_overrides.dart';
 import '../core/llm_config.dart';
@@ -13,6 +16,7 @@ import '../core/engine_rpc.dart';
 import '../core/llm_errors.dart';
 import '../core/model_diagnostics.dart';
 import '../core/model_params_builder.dart';
+import '../core/session_ops.dart';
 import '../core/performance_metrics.dart';
 import '../core/streaming_result.dart';
 import '../core/tools.dart';
@@ -63,6 +67,24 @@ Future<void> _llamaIsolateWorkerMain(Map<String, dynamic> args) async {
     return completer.future;
   }
 
+  // Conversations live here, next to the engine: ChatSession holds a
+  // LlamaEngine, so it cannot be sent across the port.
+  final sessions = SessionRegistry(
+    createSession: (options) => RealChatSession(
+      ChatSession(
+        engine,
+        maxContextTokens: options.maxContextTokens,
+        systemPrompt: options.systemPrompt,
+      ),
+    ),
+    baseParams: () => baseParams,
+    enableThinkingDefault: () => config.enableThinkingDefault,
+    readPerf: () => readBackendPerf(engine),
+    // Conversation turns share the worker's queue with one-shot generation and
+    // with model lifecycle operations.
+    serialize: (action) => serialized(action),
+  );
+
   // Stops an in-flight generation *outside* the queue, so unload and dispose
   // interrupt it instead of waiting behind it.
   Future<void> abortGeneration() async {
@@ -98,6 +120,7 @@ Future<void> _llamaIsolateWorkerMain(Map<String, dynamic> args) async {
       case 'unload':
         final replyPort = message['replyPort'] as SendPort;
         await abortGeneration();
+        sessions.closeAll();
         try {
           await serialized(engine.unloadModel);
           pendingPrefixInvalidation = false;
@@ -108,7 +131,36 @@ Future<void> _llamaIsolateWorkerMain(Map<String, dynamic> args) async {
 
       case 'clean':
         pendingPrefixInvalidation = true;
+        if (message['resetConversations'] as bool? ?? true) {
+          sessions.resetAll();
+        }
         (message['replyPort'] as SendPort?)?.send({'type': 'ok'});
+
+      case 'session':
+        final replyPort = message['replyPort'] as SendPort;
+        try {
+          replyPort.send({
+            'type': 'ok',
+            'value': dispatchSessionCall(
+              sessions,
+              message['method'] as String,
+              (message['args'] as Map?)?.cast<String, dynamic>() ?? const {},
+            ),
+          });
+        } catch (e) {
+          replyPort.send({'type': 'error', ...encodeError(e)});
+        }
+
+      case 'session_turn':
+        final streamPort = message['streamPort'] as SendPort;
+        sessions
+            .turn(message['id'] as String, message['request'] as TurnRequest)
+            .listen(
+              (event) => streamPort.send({'type': 'event', 'event': event}),
+              onDone: () => streamPort.send({'type': 'done'}),
+              onError: (Object e) =>
+                  streamPort.send({'type': 'error', ...encodeError(e)}),
+            );
 
       case 'generate':
         final prompt = message['prompt'] as String;
@@ -217,6 +269,7 @@ Future<void> _llamaIsolateWorkerMain(Map<String, dynamic> args) async {
 
       case 'dispose':
         await abortGeneration();
+        sessions.closeAll();
         await engine.dispose();
         (message['replyPort'] as SendPort?)?.send({'type': 'disposed'});
         receivePort.close();
@@ -282,6 +335,89 @@ class LlmModelIsolated extends LlmModelBase {
     if (reply['type'] == 'error') {
       throw decodeError(reply, context: context);
     }
+  }
+
+  int _nextSessionId = 0;
+
+  @override
+  Future<Conversation> startConversation({
+    String? systemPrompt,
+    int? maxContextTokens,
+    List<LlmChatMessage>? history,
+    ContextOverflowPolicy overflowPolicy = ContextOverflowPolicy.allow,
+    bool keepThinkingInHistory = false,
+  }) async {
+    checkInitialized();
+    final id = 's${_nextSessionId++}';
+    await _sessionCall('open', {
+      'id': id,
+      'options': SessionOptions(
+        systemPrompt: systemPrompt,
+        maxContextTokens: maxContextTokens,
+        overflowPolicy: overflowPolicy,
+        keepThinkingInHistory: keepThinkingInHistory,
+      ),
+      if (history != null) 'history': history,
+    });
+    return Conversation(id, _IsolateConversationTransport(this));
+  }
+
+  /// One request-reply session operation on the worker's registry.
+  Future<Object?> _sessionCall(String method, Map<String, dynamic> args) async {
+    final replyPort = ReceivePort();
+    _workerPort!.send({
+      'type': 'session',
+      'method': method,
+      'args': args,
+      'replyPort': replyPort.sendPort,
+    });
+
+    final reply = (await replyPort.first as Map).cast<String, dynamic>();
+    replyPort.close();
+
+    if (reply['type'] == 'error') {
+      throw decodeError(reply, context: 'Conversation "$method" failed');
+    }
+    return reply['value'];
+  }
+
+  /// Bridges one conversation turn from the worker's registry.
+  Stream<GenerationEvent> _sessionTurn(String id, TurnRequest request) {
+    final controller = StreamController<GenerationEvent>();
+    final replyPort = ReceivePort();
+
+    _workerPort!.send({
+      'type': 'session_turn',
+      'id': id,
+      'request': request,
+      'streamPort': replyPort.sendPort,
+    });
+
+    final sub = replyPort.listen((dynamic msg) {
+      if (msg is! Map<String, dynamic>) return;
+      switch (msg['type'] as String?) {
+        case 'event':
+          if (!controller.isClosed) {
+            controller.add(msg['event'] as GenerationEvent);
+          }
+        case 'done':
+          replyPort.close();
+          if (!controller.isClosed) controller.close();
+        case 'error':
+          replyPort.close();
+          if (!controller.isClosed) {
+            controller.addError(decodeError(msg, context: 'Conversation turn'));
+            controller.close();
+          }
+      }
+    });
+
+    controller.onCancel = () {
+      sub.cancel();
+      replyPort.close();
+    };
+
+    return controller.stream;
   }
 
   @override
@@ -584,4 +720,40 @@ class LlmModelIsolated extends LlmModelBase {
   @override
   Future<ModelDiagnostics> diagnostics() async =>
       (await _call('diagnostics')) as ModelDiagnostics;
+}
+
+/// Reaches the [SessionRegistry] living in the worker isolate.
+class _IsolateConversationTransport implements ConversationTransport {
+  final LlmModelIsolated _model;
+
+  _IsolateConversationTransport(this._model);
+
+  @override
+  Stream<GenerationEvent> turn(String id, TurnRequest request) =>
+      _model._sessionTurn(id, request);
+
+  @override
+  Future<List<LlmChatMessage>> history(String id) async =>
+      ((await _model._sessionCall('history', {'id': id})) as List)
+          .cast<LlmChatMessage>();
+
+  @override
+  Future<void> restore(String id, List<LlmChatMessage> messages) async =>
+      _model._sessionCall('restore', {'id': id, 'history': messages});
+
+  @override
+  Future<void> reset(String id, {bool keepSystemPrompt = true}) async => _model
+      ._sessionCall('reset', {'id': id, 'keepSystemPrompt': keepSystemPrompt});
+
+  @override
+  Future<void> setSystemPrompt(String id, String? value) async =>
+      _model._sessionCall('setSystemPrompt', {'id': id, 'value': value});
+
+  @override
+  Future<void> cancel(String id) async =>
+      _model._sessionCall('cancel', {'id': id});
+
+  @override
+  Future<void> close(String id) async =>
+      _model._sessionCall('close', {'id': id});
 }

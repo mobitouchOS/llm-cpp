@@ -122,6 +122,46 @@ llama.cpp's own counters, read through `LlamaEngine.getPerformanceContext()` —
 `lib/src/core/backend_perf.dart`. `tokensPerSecond` is then decode throughput and excludes
 prompt ingestion.
 
+### Conversations (multi-turn)
+
+`LocalModel.startConversation()` returns a `Conversation` — history, context budgeting and the
+tool loop. The one-shot `sendPrompt*` methods stay stateless; the app picks explicitly, so a RAG
+answer or a classification never inherits an earlier turn.
+
+The session is llamadart's `ChatSession`, which holds a `LlamaEngine` and therefore cannot cross
+the port — it lives **inside the worker**, addressed by an opaque id. All of the logic lives in
+`lib/src/core/session_ops.dart` (`SessionRegistry`), which the in-process backend calls directly
+and the isolate backend reaches through `session` / `session_turn` messages, so the two backends
+cannot drift. `ChatSessionLike` is the seam that makes it all testable without a model.
+
+What the registry has to compensate for in `ChatSession`:
+
+- **Trimming is silent and destructive.** `_enforceContextLimit` permanently deletes the oldest
+  turns, and if the prompt still does not fit it logs a warning and sends it anyway. The registry
+  diffs history by identity around each turn and reports what vanished as
+  `ConversationChunk.dropped` and on the broadcast `Conversation.trims`;
+  `ContextOverflowPolicy.fail` turns "still does not fit" into an exception raised before any
+  output is consumed.
+- **Cancelling skips the assistant turn.** `ChatSession.create` appends it after its last yield,
+  so cancelling or erroring leaves a user message with no reply and the next turn renders two
+  user messages in a row. There is no removal API, so the registry appends what was produced.
+- **One tool result per message.** llamadart's message JSON keeps only the first, so
+  `submitToolResults` fans several results out into several messages.
+- **System messages in history are ignored.** Only the `systemPrompt` field reaches the model, so
+  `restore` routes a system message there instead of losing it.
+- **Reasoning in history** is stripped unless `keepThinkingInHistory: true`, because whether a
+  model's template renders `reasoning_content` is model-dependent and re-sending it costs context
+  every turn. `ChatSession` keeps history private, so stripping means reset + re-add.
+
+Turns are serialized across every conversation *and* one-shot generation on a model: chat runs on
+sequence 0 of one context. `maxParallelSequences` sizes the KV cache for batched embeddings, not
+for chat, so raising it buys no concurrency.
+
+`LlmChatMessage` (`lib/src/core/chat_message.dart`) is the plugin's own history type —
+llamadart's `LlamaChatMessage.toJson()` is prompt-shaped and lossy. Note the name: `ChatMessage`
+was already taken by the cloud provider API (`lib/src/api/chat_models.dart`). Attachments travel
+with the object but are not written by `toJson()`.
+
 ### Tool calling and structured output
 
 Declare tools per request through `GenerationOverrides.tools` (`LlmTool` — name, description,

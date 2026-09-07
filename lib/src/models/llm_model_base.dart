@@ -3,6 +3,9 @@ import 'package:flutter/foundation.dart';
 
 import 'package:llamadart/llamadart.dart' show LlamaContentPart;
 
+import '../core/chat_message.dart';
+import '../core/conversation.dart';
+import '../core/conversation_types.dart';
 import '../core/generation_overrides.dart';
 import '../core/generation_result.dart';
 import '../core/llm_config.dart';
@@ -29,6 +32,17 @@ abstract class LlmModelBase implements LlmInterface {
   /// memory and the cached prompt tokens before ingesting its prompt —
   /// nothing is recomputed until then, so calling this is free.
   Future<void> clean({bool resetConversations = true});
+
+  // ── Conversations ────────────────────────────────────────────────────────
+
+  /// Opens a multi-turn conversation on this model.
+  Future<Conversation> startConversation({
+    String? systemPrompt,
+    int? maxContextTokens,
+    List<LlmChatMessage>? history,
+    ContextOverflowPolicy overflowPolicy = ContextOverflowPolicy.allow,
+    bool keepThinkingInHistory = false,
+  });
 
   // ── Generation ───────────────────────────────────────────────────────────
 

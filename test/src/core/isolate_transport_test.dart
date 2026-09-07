@@ -75,6 +75,50 @@ void main() {
       expect(restored.thinkingBudget?.maxTokens, 64);
     });
 
+    test('declared tools survive the isolate boundary', () async {
+      const overrides = GenerationOverrides(
+        tools: [
+          LlmTool(
+            name: 'get_weather',
+            description: 'Weather for a city',
+            parameters: [],
+          ),
+        ],
+        toolChoice: ToolChoice.required,
+        parallelToolCalls: true,
+        responseFormat: {'type': 'json_object'},
+      );
+
+      final restored = await _roundTrip(overrides) as GenerationOverrides;
+
+      expect(restored.tools?.single.name, 'get_weather');
+      expect(restored.toolChoice, ToolChoice.required);
+      expect(restored.parallelToolCalls, isTrue);
+      expect(restored.responseFormat, {'type': 'json_object'});
+    });
+
+    test('ModelDiagnostics survives the isolate boundary', () async {
+      const diagnostics = ModelDiagnostics(
+        backendName: 'Metal',
+        availableBackends: 'Metal,CPU',
+        resolvedGpuLayers: 32,
+        gpuSupported: true,
+        modelFileType: 'q4_K_M',
+        contextSize: 4096,
+        supportsVision: false,
+        supportsAudio: false,
+        supportsStatePersistence: true,
+        vramTotal: 8000,
+        vramFree: 4000,
+      );
+
+      final restored = await _roundTrip(diagnostics) as ModelDiagnostics;
+
+      expect(restored.backendName, 'Metal');
+      expect(restored.resolvedGpuLayers, 32);
+      expect(restored.supportsStatePersistence, isTrue);
+    });
+
     test('attachments survive the isolate boundary', () async {
       final attachments = <LlamaContentPart>[
         LlamaImageContent(path: '/tmp/cat.png'),

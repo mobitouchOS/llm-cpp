@@ -9,10 +9,13 @@ import '../core/backend_perf.dart';
 import '../core/generation_event.dart';
 import '../core/generation_overrides.dart';
 import '../core/llm_config.dart';
+import '../core/engine_rpc.dart';
 import '../core/llm_errors.dart';
+import '../core/model_diagnostics.dart';
 import '../core/model_params_builder.dart';
 import '../core/performance_metrics.dart';
 import '../core/streaming_result.dart';
+import '../core/tools.dart';
 import 'llm_model_base.dart';
 
 /// How long [LlmModelIsolated.dispose] waits for the worker to confirm that
@@ -61,6 +64,7 @@ Future<void> _llamaIsolateWorkerMain(Map<String, dynamic> args) async {
             overrides?.enableThinking ?? config.enableThinkingDefault;
 
         String? finishReason;
+        final toolCalls = ToolCallAccumulator();
 
         genSubscription = engine
             .create(
@@ -71,11 +75,20 @@ Future<void> _llamaIsolateWorkerMain(Map<String, dynamic> args) async {
               ),
               params: params,
               enableThinking: enableThinking,
+              tools: overrides?.tools
+                  ?.map((t) => t.toToolDefinition())
+                  .toList(),
+              toolChoice: overrides?.toolChoice,
+              parallelToolCalls: overrides?.parallelToolCalls ?? false,
+              responseFormat: overrides?.responseFormat,
             )
             .listen(
               (chunk) {
                 final choice = chunk.choices.firstOrNull;
                 finishReason = choice?.finishReason ?? finishReason;
+
+                final deltas = choice?.delta.toolCalls;
+                if (deltas != null) toolCalls.add(deltas);
 
                 final text = choice?.delta.content;
                 if (text != null) {
@@ -92,6 +105,11 @@ Future<void> _llamaIsolateWorkerMain(Map<String, dynamic> args) async {
                   'type': 'done',
                   if (finishReason != null) 'finishReason': finishReason,
                   'perf': await readBackendPerf(engine),
+                  if (!toolCalls.isEmpty)
+                    'toolCalls': toolCalls
+                        .build()
+                        .map((c) => c.toMap())
+                        .toList(),
                 });
               },
               onError: (Object e) {
@@ -99,6 +117,19 @@ Future<void> _llamaIsolateWorkerMain(Map<String, dynamic> args) async {
                 streamPort.send({'type': 'error', ...encodeError(e)});
               },
             );
+
+      case 'call':
+        final replyPort = message['replyPort'] as SendPort;
+        try {
+          final value = await dispatchEngineCall(
+            engine,
+            message['method'] as String,
+            (message['args'] as Map?)?.cast<String, dynamic>() ?? const {},
+          );
+          replyPort.send({'type': 'ok', 'value': value});
+        } catch (e) {
+          replyPort.send({'type': 'error', ...encodeError(e)});
+        }
 
       case 'cancel':
         genSubscription?.cancel();
@@ -186,6 +217,10 @@ class LlmModelIsolated extends LlmModelBase {
                 isFinal: true,
                 finishReason: msg['finishReason'] as String?,
                 perf: (msg['perf'] as Map?)?.cast<String, dynamic>(),
+                toolCalls: [
+                  for (final call in (msg['toolCalls'] as List?) ?? const [])
+                    LlmToolCall.fromMap((call as Map).cast<String, dynamic>()),
+                ],
               ),
             );
             controller.close();
@@ -314,6 +349,7 @@ class LlmModelIsolated extends LlmModelBase {
             ),
             isFinal: true,
             finishReason: event.finishReason,
+            toolCalls: event.toolCalls,
           );
           continue;
         }
@@ -359,6 +395,80 @@ class LlmModelIsolated extends LlmModelBase {
     _isolate = null;
     markAsDisposed();
   }
+
+  /// Round-trips one non-streaming engine call through the worker.
+  Future<Object?> _call(String method, [Map<String, dynamic> args = const {}]) {
+    checkInitialized();
+    final replyPort = ReceivePort();
+    _workerPort!.send({
+      'type': 'call',
+      'method': method,
+      'args': args,
+      'replyPort': replyPort.sendPort,
+    });
+    return replyPort.first.then((dynamic response) {
+      replyPort.close();
+      final map = (response as Map).cast<String, dynamic>();
+      if (map['type'] == 'error') {
+        throw decodeError(map, context: 'Engine call "$method" failed');
+      }
+      return map['value'];
+    });
+  }
+
+  @override
+  Future<List<int>> tokenize(String text, {bool addSpecial = true}) async =>
+      ((await _call('tokenize', {'text': text, 'addSpecial': addSpecial}))
+              as List)
+          .cast<int>();
+
+  @override
+  Future<String> detokenize(List<int> tokens, {bool special = false}) async =>
+      (await _call('detokenize', {'tokens': tokens, 'special': special}))
+          as String;
+
+  @override
+  Future<int> countTokens(String text) async =>
+      (await _call('countTokens', {'text': text})) as int;
+
+  @override
+  Future<int> contextSize() async => (await _call('contextSize')) as int;
+
+  @override
+  Future<Map<String, String>> metadata() async =>
+      ((await _call('metadata')) as Map).cast<String, String>();
+
+  @override
+  Future<bool> get supportsStatePersistence async =>
+      (await _call('supportsStatePersistence')) as bool;
+
+  @override
+  Future<bool> saveState(String path, {required List<int> tokens}) async =>
+      (await _call('saveState', {'path': path, 'tokens': tokens})) as bool;
+
+  @override
+  Future<List<int>> loadState(String path, {int? tokenCapacity}) async =>
+      ((await _call('loadState', {
+                'path': path,
+                if (tokenCapacity != null) 'tokenCapacity': tokenCapacity,
+              }))
+              as List)
+          .cast<int>();
+
+  @override
+  Future<void> setLora(String path, {double scale = 1.0}) async =>
+      _call('setLora', {'path': path, 'scale': scale});
+
+  @override
+  Future<void> removeLora(String path) async =>
+      _call('removeLora', {'path': path});
+
+  @override
+  Future<void> clearLoras() async => _call('clearLoras');
+
+  @override
+  Future<ModelDiagnostics> diagnostics() async =>
+      (await _call('diagnostics')) as ModelDiagnostics;
 
   @override
   void clean() {

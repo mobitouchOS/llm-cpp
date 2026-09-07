@@ -99,6 +99,10 @@ class RagPipeline {
   /// them as part of the user's question.
   final String systemPrompt;
 
+  /// How many chunks are embedded per batch during ingestion. Larger batches
+  /// are faster; smaller ones report progress more often.
+  final int embedBatchSize;
+
   /// Default RAG instructions, sent as the system message.
   static const String defaultSystemPrompt =
       'Answer the question using only the context the user provides. '
@@ -119,6 +123,7 @@ class RagPipeline {
     TextChunker? chunker,
     String? promptTemplate,
     String? systemPrompt,
+    this.embedBatchSize = 16,
   }) : chunker = chunker ?? const TextChunker(),
        promptTemplate = promptTemplate ?? defaultPromptTemplate,
        systemPrompt = systemPrompt ?? defaultSystemPrompt;
@@ -154,17 +159,25 @@ class RagPipeline {
       currentPreview: 'Splitting into ${chunks.length} chunks...',
     );
 
-    // Step 2: embed each chunk
-    for (int i = 0; i < chunks.length; i++) {
-      final chunk = chunks[i];
-      chunk.embedding = await embeddingProvider.embed(chunk.text);
+    // Step 2: embed in batches — one native batch call beats one isolate
+    // round-trip per chunk, while still reporting progress often enough to
+    // drive a progress bar.
+    for (int start = 0; start < chunks.length; start += embedBatchSize) {
+      final end = (start + embedBatchSize).clamp(0, chunks.length);
+      final batch = chunks.sublist(start, end);
 
+      final embeddings = await embeddingProvider.embedBatch([
+        for (final chunk in batch) chunk.text,
+      ]);
+      for (int i = 0; i < batch.length; i++) {
+        batch[i].embedding = embeddings[i];
+      }
+
+      final last = batch.last.text;
       yield RagIngestionProgress(
         totalChunks: chunks.length,
-        embeddedChunks: i + 1,
-        currentPreview: chunk.text.length > 60
-            ? chunk.text.substring(0, 60)
-            : chunk.text,
+        embeddedChunks: end,
+        currentPreview: last.length > 60 ? last.substring(0, 60) : last,
       );
     }
 

@@ -1,6 +1,7 @@
 // lib/src/core/streaming_result.dart
 
 import 'performance_metrics.dart';
+import 'tools.dart';
 
 /// Streaming chunk with optional performance metrics
 class StreamingChunk {
@@ -26,6 +27,11 @@ class StreamingChunk {
   /// report one.
   final String? finishReason;
 
+  /// Tool calls the model requested, reassembled from their streamed
+  /// fragments. Only set on the final chunk, and empty unless tools were
+  /// declared through [GenerationOverrides.tools].
+  final List<LlmToolCall> toolCalls;
+
   /// Whether generation stopped because it hit the token budget
   /// (`nPredict`) rather than finishing on its own.
   bool get isTruncated => finishReason == 'length';
@@ -36,11 +42,13 @@ class StreamingChunk {
     this.metrics,
     this.isFinal = false,
     this.finishReason,
+    this.toolCalls = const [],
   });
 
   @override
   String toString() {
     return 'StreamingChunk(text: "$text", thinking: $thinking, '
-        'metrics: $metrics, isFinal: $isFinal, finishReason: $finishReason)';
+        'metrics: $metrics, isFinal: $isFinal, finishReason: $finishReason, '
+        'toolCalls: $toolCalls)';
   }
 }

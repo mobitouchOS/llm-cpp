@@ -63,8 +63,9 @@ All three take the same optional arguments:
 - `overrides` (`GenerationOverrides`) — sampling for this request only, without reloading the model
 
 `StreamingChunk` carries: `text`, `thinking` (reasoning channel — never mixed into `text`),
-`metrics` (`PerformanceMetrics`), an `isFinal` flag, and `finishReason` (set on the final chunk —
-`'stop'` vs `'length'`; `isTruncated` is the shorthand for hitting the `nPredict` budget).
+`metrics` (`PerformanceMetrics`), an `isFinal` flag, `finishReason` (set on the final chunk —
+`'stop'` vs `'length'`; `isTruncated` is the shorthand for hitting the `nPredict` budget), and
+`toolCalls` (final chunk only).
 
 ### Configuration
 
@@ -121,6 +122,37 @@ llama.cpp's own counters, read through `LlamaEngine.getPerformanceContext()` —
 `lib/src/core/backend_perf.dart`. `tokensPerSecond` is then decode throughput and excludes
 prompt ingestion.
 
+### Tool calling and structured output
+
+Declare tools per request through `GenerationOverrides.tools` (`LlmTool` — name, description,
+`ToolParam` schema), with `toolChoice`, `parallelToolCalls` and `responseFormat`. Declaring tools
+constrains decoding to their schema and lets llamadart parse the call out of whatever envelope
+the model's chat template uses.
+
+`LlmTool` deliberately has **no handler**: generation runs in a worker isolate, so your code
+cannot (and should not) execute there. Completed calls arrive as data on
+`StreamingChunk.toolCalls` (final chunk only) — llamadart streams a call's name and arguments as
+fragments, and `ToolCallAccumulator` (`lib/src/core/tools.dart`) reassembles them so callers do
+not have to.
+
+### Engine operations beyond generation
+
+`LocalModel` also exposes, on both backends:
+
+- **Tokenization** — `tokenize`, `detokenize`, `countTokens`, `contextSize`, `metadata`
+- **KV-cache state** — `supportsStatePersistence`, `saveState(path, tokens:)`,
+  `loadState(path)`: resume a long conversation without paying prompt ingestion again
+- **Runtime LoRA** — `setLora`, `removeLora`, `clearLoras` (previously load-time only)
+- **Diagnostics** — `diagnostics()` → `ModelDiagnostics`: which backend actually won, how many
+  layers really reached the GPU, GGUF file type, vision/audio support, VRAM
+
+The isolate backend reaches these through a `call` message; both backends share the dispatch in
+`lib/src/core/engine_rpc.dart`, so a new operation is wired once.
+
+Not wired: `loadModelSource` / `loadModelFromUrl` and llamadart's download manager. Model
+downloading needs app-level cache-directory decisions (and apps typically already have a
+downloader with resume and notifications), so `loadModel` still takes a local path.
+
 ### Errors
 
 llamadart's typed exceptions survive the worker isolate boundary: workers encode them with
@@ -151,6 +183,13 @@ Use `AIChatProviderFactory.create(AIChatProviderType)` to instantiate. Exception
 
 - `LlamaEmbeddingProvider` — standalone embed isolate (CPU-only)
 - `LocalModel` — generation isolate (GPU configured)
+
+Both embedding paths use llamadart's native batch call (`embedBatch`) instead of one isolate
+round-trip per chunk, size chunks with the model's tokenizer instead of a character count
+(`lib/src/rag/embeddings/embed_worker_ops.dart` — a fixed 2000-character cut is not 512 tokens,
+so long chunks used to overrun the encoder), and read the embedding width from GGUF metadata
+rather than spending an inference pass on a probe string. `RagPipeline.embedBatchSize` (default
+16) trades ingestion speed against progress granularity.
 
 `RagPipeline` calls `sendPromptStream(augmentedPrompt, systemPrompt: systemPrompt)`, so the
 instructions travel as a real `system` message and only the context + question go into the user

@@ -5,11 +5,14 @@ import 'dart:io';
 import 'package:llamadart/llamadart.dart';
 
 import '../core/backend_perf.dart';
+import '../core/engine_rpc.dart';
 import '../core/generation_overrides.dart';
 import '../core/llm_config.dart';
+import '../core/model_diagnostics.dart';
 import '../core/model_params_builder.dart';
 import '../core/performance_metrics.dart';
 import '../core/streaming_result.dart';
+import '../core/tools.dart';
 import 'llm_model_base.dart';
 
 class LlmModelStandard extends LlmModelBase {
@@ -33,6 +36,10 @@ class LlmModelStandard extends LlmModelBase {
       ),
       params: overrides?.applyTo(base) ?? base,
       enableThinking: overrides?.enableThinking ?? config.enableThinkingDefault,
+      tools: overrides?.tools?.map((t) => t.toToolDefinition()).toList(),
+      toolChoice: overrides?.toolChoice,
+      parallelToolCalls: overrides?.parallelToolCalls ?? false,
+      responseFormat: overrides?.responseFormat,
     );
   }
 
@@ -150,6 +157,7 @@ class LlmModelStandard extends LlmModelBase {
     markGenerationStart();
     try {
       String? finishReason;
+      final toolCalls = ToolCallAccumulator();
 
       await for (final chunk in _create(
         prompt,
@@ -159,6 +167,9 @@ class LlmModelStandard extends LlmModelBase {
       )) {
         final choice = chunk.choices.firstOrNull;
         finishReason = choice?.finishReason ?? finishReason;
+
+        final deltas = choice?.delta.toolCalls;
+        if (deltas != null) toolCalls.add(deltas);
 
         final text = choice?.delta.content;
         final thinking = choice?.delta.thinking;
@@ -188,6 +199,7 @@ class LlmModelStandard extends LlmModelBase {
         ),
         isFinal: true,
         finishReason: finishReason,
+        toolCalls: toolCalls.build(),
       );
     } finally {
       markGenerationEnd();
@@ -201,6 +213,65 @@ class LlmModelStandard extends LlmModelBase {
     await engine?.dispose();
     markAsDisposed();
   }
+
+  Future<Object?> _call(String method, [Map<String, dynamic> args = const {}]) {
+    checkInitialized();
+    return dispatchEngineCall(_engine!, method, args);
+  }
+
+  @override
+  Future<List<int>> tokenize(String text, {bool addSpecial = true}) async =>
+      ((await _call('tokenize', {'text': text, 'addSpecial': addSpecial}))
+              as List)
+          .cast<int>();
+
+  @override
+  Future<String> detokenize(List<int> tokens, {bool special = false}) async =>
+      (await _call('detokenize', {'tokens': tokens, 'special': special}))
+          as String;
+
+  @override
+  Future<int> countTokens(String text) async =>
+      (await _call('countTokens', {'text': text})) as int;
+
+  @override
+  Future<int> contextSize() async => (await _call('contextSize')) as int;
+
+  @override
+  Future<Map<String, String>> metadata() async =>
+      ((await _call('metadata')) as Map).cast<String, String>();
+
+  @override
+  Future<bool> get supportsStatePersistence async =>
+      (await _call('supportsStatePersistence')) as bool;
+
+  @override
+  Future<bool> saveState(String path, {required List<int> tokens}) async =>
+      (await _call('saveState', {'path': path, 'tokens': tokens})) as bool;
+
+  @override
+  Future<List<int>> loadState(String path, {int? tokenCapacity}) async =>
+      ((await _call('loadState', {
+                'path': path,
+                if (tokenCapacity != null) 'tokenCapacity': tokenCapacity,
+              }))
+              as List)
+          .cast<int>();
+
+  @override
+  Future<void> setLora(String path, {double scale = 1.0}) async =>
+      _call('setLora', {'path': path, 'scale': scale});
+
+  @override
+  Future<void> removeLora(String path) async =>
+      _call('removeLora', {'path': path});
+
+  @override
+  Future<void> clearLoras() async => _call('clearLoras');
+
+  @override
+  Future<ModelDiagnostics> diagnostics() async =>
+      (await _call('diagnostics')) as ModelDiagnostics;
 
   @override
   void clean() {

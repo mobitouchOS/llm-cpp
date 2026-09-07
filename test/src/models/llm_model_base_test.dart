@@ -96,6 +96,48 @@ class MockLlmModel extends LlmModelBase {
     checkInitialized();
     _cleanCalled = true;
   }
+
+  // Engine-backed operations are out of scope for these lifecycle tests.
+  @override
+  Future<List<int>> tokenize(String text, {bool addSpecial = true}) async =>
+      const [];
+
+  @override
+  Future<String> detokenize(List<int> tokens, {bool special = false}) async =>
+      '';
+
+  @override
+  Future<int> countTokens(String text) async => 0;
+
+  @override
+  Future<int> contextSize() async => 0;
+
+  @override
+  Future<Map<String, String>> metadata() async => const {};
+
+  @override
+  Future<bool> get supportsStatePersistence async => false;
+
+  @override
+  Future<bool> saveState(String path, {required List<int> tokens}) async =>
+      false;
+
+  @override
+  Future<List<int>> loadState(String path, {int? tokenCapacity}) async =>
+      const [];
+
+  @override
+  Future<void> setLora(String path, {double scale = 1.0}) async {}
+
+  @override
+  Future<void> removeLora(String path) async {}
+
+  @override
+  Future<void> clearLoras() async {}
+
+  @override
+  Future<ModelDiagnostics> diagnostics() async =>
+      throw UnsupportedError('MockLlmModel has no engine.');
 }
 
 void main() {

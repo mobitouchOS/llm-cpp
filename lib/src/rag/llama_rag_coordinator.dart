@@ -22,6 +22,7 @@ import '../core/llm_errors.dart';
 import '../core/llm_interface.dart';
 import '../core/performance_metrics.dart';
 import '../core/streaming_result.dart';
+import 'embeddings/embed_worker_ops.dart';
 import 'embeddings/embedding_provider.dart';
 
 /// How long [LlamaRagCoordinator.dispose] waits for the worker to confirm that
@@ -69,7 +70,11 @@ Future<void> _llamaRagWorkerMain(Map<String, dynamic> args) async {
   final baseParams = buildGenerationParams(genConfig);
 
   final receivePort = ReceivePort();
-  mainPort.send({'type': 'ready', 'port': receivePort.sendPort});
+  mainPort.send({
+    'type': 'ready',
+    'port': receivePort.sendPort,
+    'dimensions': await embeddingDimensionsFromMetadata(embedEngine),
+  });
 
   StreamSubscription<LlamaCompletionChunk>? genSubscription;
 
@@ -78,11 +83,28 @@ Future<void> _llamaRagWorkerMain(Map<String, dynamic> args) async {
 
     switch (message['type'] as String?) {
       case 'embed':
-        final text = message['text'] as String;
         final replyPort = message['replyPort'] as SendPort;
         try {
+          final text = await fitToContext(
+            embedEngine,
+            message['text'] as String,
+            embedContextSize,
+          );
           final embedding = await embedEngine.embed(text);
           replyPort.send({'type': 'ok', 'embedding': embedding});
+        } catch (e) {
+          replyPort.send({'type': 'error', ...encodeError(e)});
+        }
+
+      case 'embed_batch':
+        final replyPort = message['replyPort'] as SendPort;
+        try {
+          final texts = [
+            for (final text in (message['texts'] as List).cast<String>())
+              await fitToContext(embedEngine, text, embedContextSize),
+          ];
+          final embeddings = await embedEngine.embedBatch(texts);
+          replyPort.send({'type': 'ok', 'embeddings': embeddings});
         } catch (e) {
           replyPort.send({'type': 'error', ...encodeError(e)});
         }
@@ -165,7 +187,7 @@ class _CoordEmbeddingProvider implements EmbeddingProvider {
     final replyPort = ReceivePort();
     _workerPort.send({
       'type': 'embed',
-      'text': _truncate(text),
+      'text': text,
       'replyPort': replyPort.sendPort,
     });
     final response = await replyPort.first as Map<String, dynamic>;
@@ -179,11 +201,25 @@ class _CoordEmbeddingProvider implements EmbeddingProvider {
 
   @override
   Future<List<List<double>>> embedBatch(List<String> texts) async {
-    final results = <List<double>>[];
-    for (final text in texts) {
-      results.add(await embed(text));
+    if (texts.isEmpty) return const [];
+
+    final replyPort = ReceivePort();
+    _workerPort.send({
+      'type': 'embed_batch',
+      'texts': texts,
+      'replyPort': replyPort.sendPort,
+    });
+
+    final response = await replyPort.first as Map<String, dynamic>;
+    replyPort.close();
+    if (response['type'] == 'error') {
+      throw decodeError(response, context: 'Embedding error');
     }
-    return results;
+
+    return [
+      for (final vector in response['embeddings'] as List)
+        [for (final value in vector as List) (value as num).toDouble()],
+    ];
   }
 
   @override
@@ -196,15 +232,6 @@ class _CoordEmbeddingProvider implements EmbeddingProvider {
 
   @override
   bool get isInitialized => _isInitialized;
-
-  String _truncate(String text, {int maxChars = 2000}) {
-    if (text.length <= maxChars) return text;
-    final truncated = text.substring(0, maxChars);
-    final lastSpace = truncated.lastIndexOf(' ');
-    return lastSpace > maxChars * 0.8
-        ? truncated.substring(0, lastSpace)
-        : truncated;
-  }
 }
 
 class _CoordPlugin implements LlmInterface {
@@ -446,12 +473,17 @@ class LlamaRagCoordinator {
 
     _workerPort = initMsg['port'] as SendPort;
 
-    final tempProvider = _CoordEmbeddingProvider(_workerPort!, dimensions: 0);
-    final probeVec = await tempProvider.embed('dim_probe');
+    // Prefer the width the model declares in GGUF metadata; only spend an
+    // inference pass on a probe when it does not declare one.
+    var dimensions = initMsg['dimensions'] as int?;
+    if (dimensions == null) {
+      final probe = _CoordEmbeddingProvider(_workerPort!, dimensions: 0);
+      dimensions = (await probe.embed('dim_probe')).length;
+    }
 
     _embeddingProvider = _CoordEmbeddingProvider(
       _workerPort!,
-      dimensions: probeVec.length,
+      dimensions: dimensions,
     );
     _generationPlugin = _CoordPlugin(_workerPort!);
   }

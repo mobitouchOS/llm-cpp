@@ -2,6 +2,11 @@
 
 ### Fixed
 
+- RAG embedding now uses llamadart's native batch call instead of one isolate round-trip per
+  chunk, sizes chunks with the model's tokenizer instead of a fixed 2000-character cut (which is
+  roughly 500–700 tokens and therefore overran the 512-token encoder context on long chunks),
+  and reads the embedding width from GGUF metadata instead of spending an inference pass on a
+  probe string.
 - Disposal no longer races llama.cpp teardown. `LlmModelIsolated`, `LlamaRagCoordinator` and
   `LlamaEmbeddingProvider` used to send a `dispose` message and immediately kill the worker
   isolate (or sleep 200 ms and hope), so `engine.dispose()` rarely finished. They now wait for
@@ -15,6 +20,20 @@
 
 ### Added
 
+- **Tool calling and structured output.** Declare tools per request with
+  `GenerationOverrides.tools` (`LlmTool`), plus `toolChoice`, `parallelToolCalls` and
+  `responseFormat`. Completed calls arrive on `StreamingChunk.toolCalls`, reassembled from the
+  fragments llamadart streams. None of llamadart 0.8.x's tool work — the area it invested most
+  of its releases in — was reachable before. `LlmTool` carries no handler: generation runs in a
+  worker isolate, so tool execution stays on the caller's side.
+- **KV-cache persistence.** `LocalModel.saveState` / `loadState` / `supportsStatePersistence`
+  restore a conversation without re-ingesting its prompt.
+- **Tokenization.** `LocalModel.tokenize`, `detokenize`, `countTokens`, `contextSize`,
+  `metadata` — the honest way to check what fits in the context window.
+- **Diagnostics.** `LocalModel.diagnostics()` reports what the backend actually resolved:
+  backend name, layers that really reached the GPU, GGUF file type, vision/audio support, VRAM.
+  Previously the only sign that GPU offload had silently fallen back to CPU was the token rate.
+- **Runtime LoRA.** `setLora` / `removeLora` / `clearLoras`; adapters were load-time only.
 - **System prompts.** All three `sendPrompt*` methods take `systemPrompt`, which is sent as a
   real `LlamaChatRole.system` message instead of being prepended to the user turn where the chat
   template treats it as user text. `RagPipeline` now uses it for its instructions

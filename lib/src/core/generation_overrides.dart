@@ -1,6 +1,9 @@
 // lib/src/core/generation_overrides.dart
 
-import 'package:llamadart/llamadart.dart' show GenerationParams, ThinkingBudget;
+import 'package:llamadart/llamadart.dart'
+    show GenerationParams, ThinkingBudget, ToolChoice;
+
+import 'tools.dart';
 
 /// Per-request sampling overrides.
 ///
@@ -28,6 +31,21 @@ class GenerationOverrides {
   final bool? enableThinking;
   final ThinkingBudget? thinkingBudget;
 
+  /// Tools the model may call for this request. Declaring tools constrains
+  /// decoding to their schema; completed calls arrive on
+  /// [StreamingChunk.toolCalls].
+  final List<LlmTool>? tools;
+
+  /// Whether the model may, must, or must not call a tool. Ignored when
+  /// [tools] is empty.
+  final ToolChoice? toolChoice;
+
+  /// Whether several tools may be called in one turn.
+  final bool? parallelToolCalls;
+
+  /// JSON-schema response format for structured output.
+  final Map<String, dynamic>? responseFormat;
+
   const GenerationOverrides({
     this.maxTokens,
     this.temp,
@@ -42,6 +60,10 @@ class GenerationOverrides {
     this.grammarRoot,
     this.enableThinking,
     this.thinkingBudget,
+    this.tools,
+    this.toolChoice,
+    this.parallelToolCalls,
+    this.responseFormat,
   });
 
   /// Applies these overrides on top of [base].

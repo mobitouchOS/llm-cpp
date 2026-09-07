@@ -1,5 +1,7 @@
 // lib/src/core/generation_event.dart
 
+import 'tools.dart';
+
 /// One message from a worker isolate: either a token, or the terminal event
 /// carrying the generation's finish reason and llama.cpp's perf counters.
 ///
@@ -15,11 +17,15 @@ class GenerationEvent {
   final String? finishReason;
   final Map<String, dynamic>? perf;
 
+  /// Completed tool calls, on the terminal event only.
+  final List<LlmToolCall> toolCalls;
+
   const GenerationEvent({
     required this.text,
     this.thinking,
     this.isFinal = false,
     this.finishReason,
     this.perf,
+    this.toolCalls = const [],
   });
 }

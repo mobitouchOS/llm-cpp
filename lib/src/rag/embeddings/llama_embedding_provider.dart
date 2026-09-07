@@ -7,6 +7,7 @@ import 'dart:isolate';
 import 'package:llamadart/llamadart.dart';
 
 import '../../core/llm_errors.dart';
+import 'embed_worker_ops.dart';
 import 'embedding_provider.dart';
 
 /// How long [LlamaEmbeddingProvider.dispose] waits for the worker to confirm
@@ -40,18 +41,40 @@ Future<void> _llamaEmbedWorkerMain(Map<String, dynamic> args) async {
   }
 
   final receivePort = ReceivePort();
-  mainPort.send({'type': 'ready', 'port': receivePort.sendPort});
+  mainPort.send({
+    'type': 'ready',
+    'port': receivePort.sendPort,
+    'dimensions': await embeddingDimensionsFromMetadata(engine),
+  });
 
   await for (final message in receivePort) {
     if (message is! Map<String, dynamic>) continue;
 
     switch (message['type'] as String?) {
       case 'embed':
-        final text = message['text'] as String;
         final replyPort = message['replyPort'] as SendPort;
         try {
+          final text = await fitToContext(
+            engine,
+            message['text'] as String,
+            contextSize,
+          );
           final embedding = await engine.embed(text);
           replyPort.send({'type': 'ok', 'embedding': embedding});
+        } catch (e) {
+          replyPort.send({'type': 'error', ...encodeError(e)});
+        }
+
+      case 'embed_batch':
+        final replyPort = message['replyPort'] as SendPort;
+        try {
+          final texts = [
+            for (final text in (message['texts'] as List).cast<String>())
+              await fitToContext(engine, text, contextSize),
+          ];
+          // One native batch call instead of one isolate round-trip per chunk.
+          final embeddings = await engine.embedBatch(texts);
+          replyPort.send({'type': 'ok', 'embeddings': embeddings});
         } catch (e) {
           replyPort.send({'type': 'error', ...encodeError(e)});
         }
@@ -152,9 +175,10 @@ class LlamaEmbeddingProvider implements EmbeddingProvider {
 
     _workerPort = initMsg['port'] as SendPort;
 
-    // Probe to discover embedding dimensions.
-    final probeVec = await embed('probe');
-    _dimensions = probeVec.length;
+    // The model usually declares its embedding width in GGUF metadata; only
+    // fall back to an inference pass when it does not.
+    final declared = initMsg['dimensions'] as int?;
+    _dimensions = declared ?? (await embed('probe')).length;
     _isInitialized = true;
   }
 
@@ -169,7 +193,7 @@ class LlamaEmbeddingProvider implements EmbeddingProvider {
     final replyPort = ReceivePort();
     _workerPort!.send({
       'type': 'embed',
-      'text': _truncate(text),
+      'text': text,
       'replyPort': replyPort.sendPort,
     });
 
@@ -186,11 +210,31 @@ class LlamaEmbeddingProvider implements EmbeddingProvider {
 
   @override
   Future<List<List<double>>> embedBatch(List<String> texts) async {
-    final results = <List<double>>[];
-    for (final text in texts) {
-      results.add(await embed(text));
+    if (_workerPort == null) {
+      throw StateError(
+        'LlamaEmbeddingProvider is not initialized. Call load() first.',
+      );
     }
-    return results;
+    if (texts.isEmpty) return const [];
+
+    final replyPort = ReceivePort();
+    _workerPort!.send({
+      'type': 'embed_batch',
+      'texts': texts,
+      'replyPort': replyPort.sendPort,
+    });
+
+    final response = await replyPort.first as Map<String, dynamic>;
+    replyPort.close();
+
+    if (response['type'] == 'error') {
+      throw decodeError(response, context: 'Embedding error');
+    }
+
+    return [
+      for (final vector in response['embeddings'] as List)
+        [for (final value in vector as List) (value as num).toDouble()],
+    ];
   }
 
   @override
@@ -216,14 +260,5 @@ class LlamaEmbeddingProvider implements EmbeddingProvider {
     _isolate = null;
     _isInitialized = false;
     _dimensions = 0;
-  }
-
-  String _truncate(String text, {int maxChars = 2000}) {
-    if (text.length <= maxChars) return text;
-    final truncated = text.substring(0, maxChars);
-    final lastSpace = truncated.lastIndexOf(' ');
-    return lastSpace > maxChars * 0.8
-        ? truncated.substring(0, lastSpace)
-        : truncated;
   }
 }

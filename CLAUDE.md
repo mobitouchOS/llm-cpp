@@ -37,7 +37,7 @@ cd example && flutter pub get && flutter run
 
 ### Public API
 
-`lib/mt_llmkit.dart` is the single export file. It re-exports everything from `src/` plus `LlamaImageContent`, `LlamaTextContent`, `LlamaContentPart`, `GpuBackend`, `LoraAdapterConfig`, `GenerationGrammarTrigger` from `llamadart`.
+`lib/mt_llmkit.dart` is the single export file. It re-exports everything from `src/` plus, from `llamadart`: the content parts (`LlamaContentPart`, `LlamaTextContent`, `LlamaImageContent`, `LlamaAudioContent`), `GpuBackend`, `LoraAdapterConfig`, `GenerationGrammarTrigger`, the config knobs surfaced through `LlmConfig` (`FlashAttention`, `KvCacheType`, `ThinkingBudget`, `SpeculativeDecodingConfig`), and the `LlamaException` hierarchy.
 
 ### Class Hierarchy
 
@@ -56,11 +56,15 @@ LlmInterface (abstract interface)               ← lib/src/core/llm_interface.d
 2. `sendPromptComplete(prompt) → Future<String>` — full response as a single string
 3. `sendPromptStream(prompt) → Stream<StreamingChunk>` — **recommended**: live streaming + real-time metrics
 
-All three accept an optional `images` parameter for vision models.
+All three take the same optional arguments:
 
-`StreamingChunk` carries: `text`, `metrics` (`PerformanceMetrics`), an `isFinal` flag, and
-`finishReason` (set on the final chunk — `'stop'` vs `'length'`; `isTruncated` is the shorthand
-for hitting the `nPredict` budget).
+- `systemPrompt` — sent as a real `system` message
+- `attachments` (`List<LlamaContentPart>`) — `LlamaImageContent` for vision models (needs `mmprojPath`), `LlamaAudioContent` for audio-capable ones
+- `overrides` (`GenerationOverrides`) — sampling for this request only, without reloading the model
+
+`StreamingChunk` carries: `text`, `thinking` (reasoning channel — never mixed into `text`),
+`metrics` (`PerformanceMetrics`), an `isFinal` flag, and `finishReason` (set on the final chunk —
+`'stop'` vs `'length'`; `isTruncated` is the shorthand for hitting the `nPredict` budget).
 
 ### Configuration
 
@@ -69,15 +73,28 @@ for hitting the `nPredict` budget).
 | Parameter | Default | Description |
 |---|---|---|
 | `temp` | 0.72 | Sampling temperature |
-| `nGpuLayers` | 64 | GPU layers offloaded |
+| `nGpuLayers` | auto (999) | GPU layers offloaded; `0` forces CPU-only |
 | `nCtx` | 8192 | Context window in tokens |
-| `nBatch` | 4096 | Batch size |
-| `nThreads` | 6 | CPU threads |
+| `nBatch` | auto | `min(nCtx, 2048)`, resolved by llama.cpp |
+| `nThreads` | auto | llama.cpp's thread heuristic |
 | `topK` | 64 | Top-K sampling |
 | `topP` | 0.95 | Top-P sampling |
 | `penaltyRepeat` | 1.1 | Repetition penalty |
+| `presencePenalty` | 0.0 | Presence penalty |
 | `mmprojPath` | null | Path to mmproj GGUF for vision |
 | `chatTemplate` | null | Custom Jinja chat template string; `null` uses the model's embedded template |
+| `enableThinking` | true | Whether reasoning models may emit a thinking block |
+| `thinkingBudget` | null | Caps tokens per reasoning block (`ThinkingBudget`) |
+| `flashAttention` | auto | Required by a quantized KV cache |
+| `cacheTypeK` / `cacheTypeV` | f16 | `q8_0` halves / `q4_0` quarters KV memory — the largest memory win on a phone |
+| `speculativeDecoding` | null | `SpeculativeDecodingConfig` (n-gram, MTP, draft model, …) |
+
+`LlmConfig.validate()` rejects combinations llama.cpp refuses (currently: a quantized KV cache
+with flash attention disabled) and is called by both backends before loading, so the failure is
+readable instead of surfacing from inside the worker isolate.
+
+`lib/src/core/model_params_builder.dart` maps `LlmConfig` onto llamadart's `ModelParams` /
+`GenerationParams` and builds the chat messages — one place to wire a new knob.
 
 ### Prompt Format
 
@@ -85,10 +102,11 @@ Override the model's built-in chat template via `LlmConfig.chatTemplate` (a raw 
 
 ### System messages
 
-Not supported yet. Every generation path builds a single `LlamaChatMessage` with
-`LlamaChatRole.user`, so instructions have to be prepended to the user string —
-which is at odds with the model's chat template. `RagPipeline` interpolates its system
-prompt into the user content for the same reason.
+Pass `systemPrompt` to any `sendPrompt*` call and it becomes a real `LlamaChatRole.system`
+message, so the model's chat template places it where it expects instructions.
+`RagPipeline` uses this for its instructions (`RagPipeline.defaultSystemPrompt`); its
+`promptTemplate` now holds only `{context}` / `{question}`. Override either through
+`RagEngine(systemPrompt:, promptTemplate:)`.
 
 ### Performance Metrics
 
@@ -134,7 +152,9 @@ Use `AIChatProviderFactory.create(AIChatProviderType)` to instantiate. Exception
 - `LlamaEmbeddingProvider` — standalone embed isolate (CPU-only)
 - `LocalModel` — generation isolate (GPU configured)
 
-`RagPipeline` injects system + user content as `\x01SYS\x01{system}\x01USR\x01{question}` via `sendPromptStream`.
+`RagPipeline` calls `sendPromptStream(augmentedPrompt, systemPrompt: systemPrompt)`, so the
+instructions travel as a real `system` message and only the context + question go into the user
+turn.
 
 ### Native Libraries
 

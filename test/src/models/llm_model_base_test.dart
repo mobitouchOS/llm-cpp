@@ -29,7 +29,12 @@ class MockLlmModel extends LlmModelBase {
   }
 
   @override
-  Stream<String> sendPrompt(String prompt, {List<LlamaImageContent>? images}) {
+  Stream<String> sendPrompt(
+    String prompt, {
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
+  }) {
     checkInitialized();
     _sendPromptCalled = true;
     _lastPrompt = prompt;
@@ -39,7 +44,9 @@ class MockLlmModel extends LlmModelBase {
   @override
   Future<String> sendPromptComplete(
     String prompt, {
-    List<LlamaImageContent>? images,
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
   }) async {
     checkInitialized();
     _sendPromptCalled = true;
@@ -50,7 +57,9 @@ class MockLlmModel extends LlmModelBase {
   @override
   Stream<StreamingChunk> sendPromptStream(
     String prompt, {
-    List<LlamaImageContent>? images,
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
   }) async* {
     checkInitialized();
     _sendPromptCalled = true;

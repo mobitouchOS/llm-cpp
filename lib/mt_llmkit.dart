@@ -4,11 +4,17 @@
 export 'package:llamadart/llamadart.dart'
     show
         LlamaImageContent,
+        LlamaAudioContent,
         LlamaTextContent,
         LlamaContentPart,
         GpuBackend,
         LoraAdapterConfig,
         GenerationGrammarTrigger,
+        // Memory and sampling knobs surfaced through LlmConfig.
+        FlashAttention,
+        KvCacheType,
+        ThinkingBudget,
+        SpeculativeDecodingConfig,
         // Exception hierarchy — model load, generation and teardown failures
         // keep their llamadart type across the worker isolate boundary, so
         // callers can tell "GPU backend failed, retry on CPU" apart from
@@ -32,6 +38,7 @@ export 'src/api/mistral_chat_provider.dart';
 export 'src/api/openai_chat_provider.dart';
 
 // ── Core ─────────────────────────────────────────────────────────────────────
+export 'src/core/generation_overrides.dart';
 export 'src/core/llm_config.dart';
 export 'src/core/llm_interface.dart';
 export 'src/core/performance_metrics.dart';

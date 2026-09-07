@@ -15,6 +15,23 @@
 
 ### Added
 
+- **System prompts.** All three `sendPrompt*` methods take `systemPrompt`, which is sent as a
+  real `LlamaChatRole.system` message instead of being prepended to the user turn where the chat
+  template treats it as user text. `RagPipeline` now uses it for its instructions
+  (`RagPipeline.defaultSystemPrompt`), and `RagEngine` accepts `systemPrompt:`.
+- **Reasoning output.** `StreamingChunk.thinking` surfaces the reasoning channel, which llamadart
+  keeps separate from the answer and which this plugin used to drop on the floor — models paid
+  full decode latency for invisible output. `LlmConfig.enableThinking` turns it off, and
+  `LlmConfig.thinkingBudget` (`ThinkingBudget`) caps tokens per reasoning block.
+- **Per-request sampling.** `GenerationOverrides` on any `sendPrompt*` call adjusts temperature,
+  token budget, seed, stop sequences, grammar and thinking for one request. Sampling used to be
+  frozen when the model loaded, so a low-temperature RAG answer and a higher-temperature chat
+  turn needed two loaded models.
+- **KV cache quantization.** `LlmConfig.cacheTypeK` / `cacheTypeV` (`KvCacheType.q8_0` halves,
+  `q4_0` quarters KV memory) with `flashAttention`, plus `kvUnified`, `useMmap`, `useMlock`,
+  `ropeFrequencyBase`, `ropeFrequencyScale`, `presencePenalty` and `speculativeDecoding`.
+  `LlmConfig.validate()` rejects a quantized KV cache with flash attention disabled — the
+  combination llama.cpp refuses — before the worker isolate starts.
 - `StreamingChunk.finishReason` (and the `isTruncated` shorthand): the final chunk now says
   whether generation ended cleanly (`'stop'`) or ran out of token budget (`'length'`). These
   were previously indistinguishable.
@@ -25,6 +42,18 @@
 
 ### Changed
 
+- **BREAKING (API):** the `images` parameter on `sendPrompt*` is now `attachments`, typed
+  `List<LlamaContentPart>`. `LlamaImageContent` still works; audio-capable models (Gemma 4,
+  Qwen3-ASR) can now be reached with `LlamaAudioContent`, which the old signature made
+  unreachable.
+- **BREAKING (defaults):** unset sizing knobs now resolve to llamadart's own auto-sizing instead
+  of fixed pre-0.8.16 numbers — `nGpuLayers` to full offload (was 64, which capped offload on
+  larger models), `nBatch` to `min(nCtx, 2048)` (was 4096, twice the compute buffer llama.cpp
+  asks for and painful on mobile), `nThreads` to llama.cpp's heuristic (was 6). Pass explicit
+  values to keep the old behaviour.
+- **BREAKING (RAG):** `RagPipeline.defaultPromptTemplate` no longer carries the instruction
+  sentence — that moved to `defaultSystemPrompt` and is sent as a system message. A custom
+  `promptTemplate` keeps working; it just no longer needs to carry instructions.
 - **BREAKING (API):** `dispose()` returns `Future<void>` on `LlmInterface`, `LocalModel`,
   `LlmModelIsolated`, `LlmModelStandard` and `RagEngine`, and must be awaited. `LocalModel.loadModel`
   now awaits the previous model's teardown before loading the next one, instead of letting the

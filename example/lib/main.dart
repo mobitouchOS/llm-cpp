@@ -107,7 +107,9 @@ class _LlmDemoPageState extends State<LlmDemoPage> {
   bool _isGenerating = false;
 
   final StringBuffer _outputBuffer = StringBuffer();
+  final StringBuffer _thinkingBuffer = StringBuffer();
   String _output = '';
+  String _thinking = '';
   String _metricsText = '';
   String _statusMessage = '';
 
@@ -239,9 +241,11 @@ class _LlmDemoPageState extends State<LlmDemoPage> {
     setState(() {
       _isGenerating = true;
       _output = '';
+      _thinking = '';
       _metricsText = '';
       _statusMessage = 'Initializing...';
       _outputBuffer.clear();
+      _thinkingBuffer.clear();
     });
 
     await _sendGgufPrompt();
@@ -259,7 +263,10 @@ class _LlmDemoPageState extends State<LlmDemoPage> {
     setState(() => _statusMessage = 'Generating...');
 
     _streamSubscription = _ggufPlugin!
-        .sendPromptStream(_promptController.text)
+        .sendPromptStream(
+          _promptController.text,
+          systemPrompt: 'You are a concise, helpful assistant.',
+        )
         .listen(
           (chunk) {
             setState(() {
@@ -267,14 +274,21 @@ class _LlmDemoPageState extends State<LlmDemoPage> {
                 _outputBuffer.write(chunk.text);
                 _output = _outputBuffer.toString();
               }
+              if (chunk.thinking != null) {
+                _thinkingBuffer.write(chunk.thinking);
+                _thinking = _thinkingBuffer.toString();
+              }
               if (chunk.metrics != null) {
                 final m = chunk.metrics!;
                 _metricsText =
-                    'Tokens: ${m.tokensGenerated} │ ${m.tokensPerSecond.toStringAsFixed(1)} t/s │ ${m.msPerToken.toStringAsFixed(0)} ms/token';
+                    'Tokens: ${m.tokensGenerated} │ ${m.tokensPerSecond.toStringAsFixed(1)} t/s │ ${m.msPerToken.toStringAsFixed(0)} ms/token'
+                    '${m.isExact ? '' : ' (est.)'}';
               }
               if (chunk.isFinal) {
                 _isGenerating = false;
-                _statusMessage = 'Done';
+                _statusMessage = chunk.isTruncated
+                    ? 'Stopped: token budget exhausted'
+                    : 'Done';
               }
             });
           },
@@ -376,6 +390,30 @@ class _LlmDemoPageState extends State<LlmDemoPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  // Reasoning models emit thinking on its own channel; it
+                  // never mixes into chunk.text.
+                  if (_thinking.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: ExpansionTile(
+                        title: const Text(
+                          'Thinking',
+                          style: TextStyle(fontSize: 13),
+                        ),
+                        tilePadding: EdgeInsets.zero,
+                        childrenPadding: EdgeInsets.zero,
+                        children: [
+                          SelectableText(
+                            _thinking,
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontStyle: FontStyle.italic,
+                              color: Colors.grey.shade600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   if (_output.isNotEmpty)
                     SelectableText(
                       _output,

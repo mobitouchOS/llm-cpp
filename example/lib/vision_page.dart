@@ -262,7 +262,7 @@ class _VisionPageState extends State<VisionPage> {
     final image = LlamaImageContent(path: _selectedImage!.path);
 
     _subscription = _plugin!
-        .sendPromptStream(prompt, images: [image])
+        .sendPromptStream(prompt, attachments: [image])
         .listen(
           (chunk) {
             setState(() {

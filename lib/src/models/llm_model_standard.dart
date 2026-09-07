@@ -5,7 +5,9 @@ import 'dart:io';
 import 'package:llamadart/llamadart.dart';
 
 import '../core/backend_perf.dart';
+import '../core/generation_overrides.dart';
 import '../core/llm_config.dart';
+import '../core/model_params_builder.dart';
 import '../core/performance_metrics.dart';
 import '../core/streaming_result.dart';
 import 'llm_model_base.dart';
@@ -16,61 +18,35 @@ class LlmModelStandard extends LlmModelBase {
 
   LlmModelStandard(this.config);
 
-  ModelParams get _modelParams => ModelParams(
-    contextSize: config.nCtxDefault,
-    gpuLayers: config.nGpuLayersDefault,
-    batchSize: config.nBatchDefault,
-    numberOfThreads: config.nThreadsDefault,
-    numberOfThreadsBatch: config.numberOfThreadsBatchDefault,
-    microBatchSize: config.microBatchSizeDefault,
-    maxParallelSequences: config.maxParallelSequencesDefault,
-    loras: config.lorasDefault,
-    chatTemplate: config.chatTemplate,
-    preferredBackend: config.gpuBackendDefault,
-  );
-
-  GenerationParams get _genParams => GenerationParams(
-    maxTokens: config.nPredictDefault,
-    temp: config.tempDefault,
-    topK: config.topKDefault,
-    topP: config.topPDefault,
-    minP: config.minPDefault,
-    penalty: config.penaltyRepeatDefault,
-    seed: config.seed,
-    stopSequences: config.stopSequencesDefault,
-    grammar: config.grammar,
-    grammarLazy: config.grammarLazyDefault,
-    grammarTriggers: config.grammarTriggersDefault,
-    preservedTokens: config.preservedTokensDefault,
-    grammarRoot: config.grammarRootDefault,
-    reusePromptPrefix: config.reusePromptPrefixDefault,
-    streamBatchTokenThreshold: config.streamBatchTokenThresholdDefault,
-    streamBatchByteThreshold: config.streamBatchByteThresholdDefault,
-  );
-
-  LlamaChatMessage _buildMessage(
+  Stream<LlamaCompletionChunk> _create(
     String prompt,
-    List<LlamaImageContent>? images,
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
   ) {
-    if (images != null && images.isNotEmpty) {
-      return LlamaChatMessage.withContent(
-        role: LlamaChatRole.user,
-        content: [LlamaTextContent(prompt), ...images],
-      );
-    }
-    return LlamaChatMessage.fromText(role: LlamaChatRole.user, text: prompt);
+    final base = buildGenerationParams(config);
+    return _engine!.create(
+      buildMessages(
+        prompt,
+        systemPrompt: systemPrompt,
+        attachments: attachments,
+      ),
+      params: overrides?.applyTo(base) ?? base,
+      enableThinking: overrides?.enableThinking ?? config.enableThinkingDefault,
+    );
   }
 
   @override
   Future<void> loadModel(String localPath) async {
     checkNotDisposed();
+    config.validate();
 
     if (!File(localPath).existsSync()) {
       throw FileSystemException('File not found', localPath);
     }
 
     _engine = LlamaEngine(LlamaBackend());
-    await _engine!.loadModel(localPath, modelParams: _modelParams);
+    await _engine!.loadModel(localPath, modelParams: buildModelParams(config));
 
     if (config.mmprojPath != null) {
       await _engine!.loadMultimodalProjector(config.mmprojPath!);
@@ -80,23 +56,33 @@ class LlmModelStandard extends LlmModelBase {
   }
 
   @override
-  Stream<String> sendPrompt(String prompt, {List<LlamaImageContent>? images}) {
+  Stream<String> sendPrompt(
+    String prompt, {
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
+  }) {
     checkInitialized();
-    return _bufferedStream(prompt, images: images);
+    return _bufferedStream(prompt, systemPrompt, attachments, overrides);
   }
 
   @override
   Future<String> sendPromptComplete(
     String prompt, {
-    List<LlamaImageContent>? images,
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
   }) async {
     checkInitialized();
     markGenerationStart();
     try {
       final buffer = StringBuffer();
-      await for (final chunk in _engine!.create([
-        _buildMessage(prompt, images),
-      ], params: _genParams)) {
+      await for (final chunk in _create(
+        prompt,
+        systemPrompt,
+        attachments,
+        overrides,
+      )) {
         final text = chunk.choices.firstOrNull?.delta.content;
         if (text != null) buffer.write(text);
       }
@@ -107,9 +93,11 @@ class LlmModelStandard extends LlmModelBase {
   }
 
   Stream<String> _bufferedStream(
-    String prompt, {
-    List<LlamaImageContent>? images,
-  }) async* {
+    String prompt,
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
+  ) async* {
     if (_engine == null) return;
 
     final buffer = StringBuffer();
@@ -118,9 +106,12 @@ class LlmModelStandard extends LlmModelBase {
 
     markGenerationStart();
     try {
-      await for (final chunk in _engine!.create([
-        _buildMessage(prompt, images),
-      ], params: _genParams)) {
+      await for (final chunk in _create(
+        prompt,
+        systemPrompt,
+        attachments,
+        overrides,
+      )) {
         final text = chunk.choices.firstOrNull?.delta.content;
         if (text == null) continue;
 
@@ -147,7 +138,9 @@ class LlmModelStandard extends LlmModelBase {
   @override
   Stream<StreamingChunk> sendPromptStream(
     String prompt, {
-    List<LlamaImageContent>? images,
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
   }) async* {
     checkInitialized();
 
@@ -158,19 +151,24 @@ class LlmModelStandard extends LlmModelBase {
     try {
       String? finishReason;
 
-      await for (final chunk in _engine!.create([
-        _buildMessage(prompt, images),
-      ], params: _genParams)) {
+      await for (final chunk in _create(
+        prompt,
+        systemPrompt,
+        attachments,
+        overrides,
+      )) {
         final choice = chunk.choices.firstOrNull;
         finishReason = choice?.finishReason ?? finishReason;
 
         final text = choice?.delta.content;
-        if (text == null) continue;
+        final thinking = choice?.delta.thinking;
+        if (text == null && thinking == null) continue;
 
         totalTokenCount += 1;
 
         yield StreamingChunk(
-          text: text,
+          text: text ?? '',
+          thinking: thinking,
           metrics: PerformanceMetrics.fromGeneration(
             tokenCount: totalTokenCount,
             startTime: startTime,

@@ -50,7 +50,7 @@ import 'vector_store/vector_store.dart';
 ///   print(chunk.text);
 /// }
 ///
-/// rag.dispose();
+/// await rag.dispose();
 /// ```
 class RagEngine {
   // ── Construction parameters ──────────────────────────────────────────────
@@ -66,6 +66,9 @@ class RagEngine {
   final int embedNCtx;
   final TextChunker chunker;
   final String? promptTemplate;
+
+  /// Overrides the RAG system message. See [RagPipeline.defaultSystemPrompt].
+  final String? systemPrompt;
 
   // ── Internal components (null until initialize() completes) ──────────────
 
@@ -84,6 +87,7 @@ class RagEngine {
     this.embedNCtx = 512,
     this.chunker = const TextChunker(),
     this.promptTemplate,
+    this.systemPrompt,
   });
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -111,6 +115,7 @@ class RagEngine {
       generationPlugin: coordinator.generationPlugin,
       chunker: chunker,
       promptTemplate: promptTemplate,
+      systemPrompt: systemPrompt,
     );
 
     _coordinator = coordinator;

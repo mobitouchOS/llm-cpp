@@ -94,14 +94,23 @@ class RagPipeline {
   final TextChunker chunker;
   final String promptTemplate;
 
+  /// Instructions sent as a real `system` message, so the model's chat
+  /// template places them where it expects instructions rather than treating
+  /// them as part of the user's question.
+  final String systemPrompt;
+
+  /// Default RAG instructions, sent as the system message.
+  static const String defaultSystemPrompt =
+      'Answer the question using only the context the user provides. '
+      'If the answer cannot be derived from that context, say so explicitly — '
+      'do not make up information.';
+
   /// Default RAG prompt template with `{context}` and `{question}` placeholders.
   ///
   /// Context is built from the `topK` best-matching chunks,
   /// separated by `---`.
   static const String defaultPromptTemplate =
-      'Based on the context below, answer the question. '
-      'If the answer cannot be derived from the context, say so explicitly — do not make up information.\n'
-      '\nCONTEXT:\n{context}\n\nQUESTION: {question}\n\nANSWER:';
+      'CONTEXT:\n{context}\n\nQUESTION: {question}\n\nANSWER:';
 
   RagPipeline({
     required this.embeddingProvider,
@@ -109,8 +118,10 @@ class RagPipeline {
     required this.generationPlugin,
     TextChunker? chunker,
     String? promptTemplate,
+    String? systemPrompt,
   }) : chunker = chunker ?? const TextChunker(),
-       promptTemplate = promptTemplate ?? defaultPromptTemplate;
+       promptTemplate = promptTemplate ?? defaultPromptTemplate,
+       systemPrompt = systemPrompt ?? defaultSystemPrompt;
 
   // ── Ingestion ─────────────────────────────────────────────────────────────
 
@@ -210,6 +221,7 @@ class RagPipeline {
       yield* generationPlugin.sendPromptStream(
         'No relevant information was found in the knowledge base for the question: "$question". '
         'Inform the user that the knowledge base does not contain relevant data.',
+        systemPrompt: systemPrompt,
       );
       return;
     }
@@ -228,7 +240,10 @@ class RagPipeline {
         .replaceAll('{question}', question);
 
     // Step 4: generate streaming response
-    yield* generationPlugin.sendPromptStream(augmentedPrompt);
+    yield* generationPlugin.sendPromptStream(
+      augmentedPrompt,
+      systemPrompt: systemPrompt,
+    );
   }
 
   /// Retrieves relevant chunks for [question] without generating a response.

@@ -15,7 +15,9 @@ import 'package:llamadart/llamadart.dart';
 
 import '../core/backend_perf.dart';
 import '../core/generation_event.dart';
+import '../core/generation_overrides.dart';
 import '../core/llm_config.dart';
+import '../core/model_params_builder.dart';
 import '../core/llm_errors.dart';
 import '../core/llm_interface.dart';
 import '../core/performance_metrics.dart';
@@ -32,57 +34,7 @@ Future<void> _llamaRagWorkerMain(Map<String, dynamic> args) async {
   final String embedModelPath = args['embedModelPath'] as String;
   final String genModelPath = args['genModelPath'] as String;
   final int embedContextSize = args['embedContextSize'] as int;
-  final int genContextSize = args['genContextSize'] as int;
-  final int batchSize = args['batchSize'] as int;
-  final int numberOfThreads = args['numberOfThreads'] as int;
-  final int numberOfThreadsBatch = args['numberOfThreadsBatch'] as int;
-  final int microBatchSize = args['microBatchSize'] as int;
-  final int maxParallelSequences = args['maxParallelSequences'] as int;
-  final String? chatTemplate = args['chatTemplate'] as String?;
-  final List<LoraAdapterConfig> loras = (args['loras'] as List)
-      .cast<Map>()
-      .map(
-        (m) => LoraAdapterConfig(
-          path: m['path'] as String,
-          scale: (m['scale'] as num).toDouble(),
-        ),
-      )
-      .toList();
-  final int maxTokens = args['maxTokens'] as int;
-  final double temp = (args['temp'] as num).toDouble();
-  final int topK = args['topK'] as int;
-  final double topP = (args['topP'] as num).toDouble();
-  final double minP = (args['minP'] as num).toDouble();
-  final double penalty = (args['penalty'] as num).toDouble();
-  final int? seed = args['seed'] as int?;
-  final List<String> stopSequences = (args['stopSequences'] as List)
-      .cast<String>();
-  final String? grammar = args['grammar'] as String?;
-  final bool grammarLazy = args['grammarLazy'] as bool;
-  final List<GenerationGrammarTrigger> grammarTriggers =
-      (args['grammarTriggers'] as List)
-          .cast<Map>()
-          .map(
-            (m) => GenerationGrammarTrigger(
-              type: m['type'] as int,
-              value: m['value'] as String,
-              token: m['token'] as int?,
-            ),
-          )
-          .toList();
-  final List<String> preservedTokens = (args['preservedTokens'] as List)
-      .cast<String>();
-  final String grammarRoot = args['grammarRoot'] as String;
-  final bool reusePromptPrefix = args['reusePromptPrefix'] as bool;
-  final int streamBatchTokenThreshold =
-      args['streamBatchTokenThreshold'] as int;
-  final int streamBatchByteThreshold = args['streamBatchByteThreshold'] as int;
-  final String gpuBackendName = args['gpuBackend'] as String;
-  final GpuBackend genGpuBackend = GpuBackend.values.firstWhere(
-    (e) => e.name == gpuBackendName,
-    orElse: () => GpuBackend.auto,
-  );
-  final int genGpuLayers = args['genGpuLayers'] as int;
+  final LlmConfig genConfig = args['genConfig'] as LlmConfig;
   final SendPort mainPort = args['sendPort'] as SendPort;
 
   final embedEngine = LlamaEngine(LlamaBackend());
@@ -92,8 +44,8 @@ Future<void> _llamaRagWorkerMain(Map<String, dynamic> args) async {
       modelParams: ModelParams(
         contextSize: embedContextSize,
         gpuLayers: 0,
-        batchSize: batchSize,
-        numberOfThreads: numberOfThreads,
+        batchSize: genConfig.nBatchDefault,
+        numberOfThreads: genConfig.nThreadsDefault,
         preferredBackend: GpuBackend.cpu,
       ),
     );
@@ -106,18 +58,7 @@ Future<void> _llamaRagWorkerMain(Map<String, dynamic> args) async {
   try {
     await genEngine.loadModel(
       genModelPath,
-      modelParams: ModelParams(
-        contextSize: genContextSize,
-        gpuLayers: genGpuLayers,
-        batchSize: batchSize,
-        numberOfThreads: numberOfThreads,
-        numberOfThreadsBatch: numberOfThreadsBatch,
-        microBatchSize: microBatchSize,
-        maxParallelSequences: maxParallelSequences,
-        loras: loras,
-        chatTemplate: chatTemplate,
-        preferredBackend: genGpuBackend,
-      ),
+      modelParams: buildModelParams(genConfig),
     );
   } catch (e) {
     await embedEngine.dispose();
@@ -125,24 +66,7 @@ Future<void> _llamaRagWorkerMain(Map<String, dynamic> args) async {
     return;
   }
 
-  final genParams = GenerationParams(
-    maxTokens: maxTokens,
-    temp: temp,
-    topK: topK,
-    topP: topP,
-    minP: minP,
-    penalty: penalty,
-    seed: seed,
-    stopSequences: stopSequences,
-    grammar: grammar,
-    grammarLazy: grammarLazy,
-    grammarTriggers: grammarTriggers,
-    preservedTokens: preservedTokens,
-    grammarRoot: grammarRoot,
-    reusePromptPrefix: reusePromptPrefix,
-    streamBatchTokenThreshold: streamBatchTokenThreshold,
-    streamBatchByteThreshold: streamBatchByteThreshold,
-  );
+  final baseParams = buildGenerationParams(genConfig);
 
   final receivePort = ReceivePort();
   mainPort.send({'type': 'ready', 'port': receivePort.sendPort});
@@ -165,13 +89,18 @@ Future<void> _llamaRagWorkerMain(Map<String, dynamic> args) async {
 
       case 'generate':
         final prompt = message['prompt'] as String;
+        final systemPrompt = message['systemPrompt'] as String?;
+        final overrides = message['overrides'] as GenerationOverrides?;
         final streamPort = message['streamPort'] as SendPort;
         String? finishReason;
 
         genSubscription = genEngine
-            .create([
-              LlamaChatMessage.fromText(role: LlamaChatRole.user, text: prompt),
-            ], params: genParams)
+            .create(
+              buildMessages(prompt, systemPrompt: systemPrompt),
+              params: overrides?.applyTo(baseParams) ?? baseParams,
+              enableThinking:
+                  overrides?.enableThinking ?? genConfig.enableThinkingDefault,
+            )
             .listen(
               (chunk) {
                 final choice = chunk.choices.firstOrNull;
@@ -179,6 +108,10 @@ Future<void> _llamaRagWorkerMain(Map<String, dynamic> args) async {
                 final text = choice?.delta.content;
                 if (text != null) {
                   streamPort.send({'type': 'token', 'text': text});
+                }
+                final thinking = choice?.delta.thinking;
+                if (thinking != null) {
+                  streamPort.send({'type': 'token', 'thinking': thinking});
                 }
               },
               onDone: () async {
@@ -290,18 +223,28 @@ class _CoordPlugin implements LlmInterface {
   Future<void> loadModel(String localPath) async {}
 
   @override
-  Stream<String> sendPrompt(String prompt, {List<LlamaImageContent>? images}) =>
-      _events(
-        prompt,
-        images: images,
-      ).where((e) => !e.isFinal).map((e) => e.text);
+  Stream<String> sendPrompt(
+    String prompt, {
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
+  }) => _events(
+    prompt,
+    systemPrompt: systemPrompt,
+    attachments: attachments,
+    overrides: overrides,
+  ).where((e) => !e.isFinal && e.text.isNotEmpty).map((e) => e.text);
 
   Stream<GenerationEvent> _events(
     String prompt, {
-    List<LlamaImageContent>? images,
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
   }) {
-    if (images != null && images.isNotEmpty) {
-      throw UnsupportedError('Vision is not supported in the RAG pipeline.');
+    if (attachments != null && attachments.isNotEmpty) {
+      throw UnsupportedError(
+        'Attachments are not supported in the RAG pipeline.',
+      );
     }
     final controller = StreamController<GenerationEvent>();
     final replyPort = ReceivePort();
@@ -310,6 +253,8 @@ class _CoordPlugin implements LlmInterface {
     _workerPort.send({
       'type': 'generate',
       'prompt': prompt,
+      if (systemPrompt != null) 'systemPrompt': systemPrompt,
+      if (overrides != null) 'overrides': overrides,
       'streamPort': replyPort.sendPort,
     });
 
@@ -319,7 +264,12 @@ class _CoordPlugin implements LlmInterface {
       switch (message['type'] as String?) {
         case 'token':
           if (!controller.isClosed) {
-            controller.add(GenerationEvent(text: message['text'] as String));
+            controller.add(
+              GenerationEvent(
+                text: message['text'] as String? ?? '',
+                thinking: message['thinking'] as String?,
+              ),
+            );
           }
         case 'done':
           finished = true;
@@ -362,10 +312,17 @@ class _CoordPlugin implements LlmInterface {
   @override
   Future<String> sendPromptComplete(
     String prompt, {
-    List<LlamaImageContent>? images,
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
   }) async {
     final buffer = StringBuffer();
-    await for (final token in sendPrompt(prompt, images: images)) {
+    await for (final token in sendPrompt(
+      prompt,
+      systemPrompt: systemPrompt,
+      attachments: attachments,
+      overrides: overrides,
+    )) {
       buffer.write(token);
     }
     return buffer.toString();
@@ -374,12 +331,19 @@ class _CoordPlugin implements LlmInterface {
   @override
   Stream<StreamingChunk> sendPromptStream(
     String prompt, {
-    List<LlamaImageContent>? images,
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
   }) async* {
     final startTime = DateTime.now();
     int totalTokenCount = 0;
 
-    await for (final event in _events(prompt, images: images)) {
+    await for (final event in _events(
+      prompt,
+      systemPrompt: systemPrompt,
+      attachments: attachments,
+      overrides: overrides,
+    )) {
       if (event.isFinal) {
         yield StreamingChunk(
           text: '',
@@ -398,6 +362,7 @@ class _CoordPlugin implements LlmInterface {
       totalTokenCount += 1;
       yield StreamingChunk(
         text: event.text,
+        thinking: event.thinking,
         metrics: PerformanceMetrics.fromGeneration(
           tokenCount: totalTokenCount,
           startTime: startTime,
@@ -444,6 +409,8 @@ class LlamaRagCoordinator {
       );
     }
 
+    genConfig.validate();
+
     final coordinator = LlamaRagCoordinator._();
     await coordinator._init(embedModelPath, genModelPath, genConfig, embedNCtx);
     return coordinator;
@@ -461,44 +428,9 @@ class LlamaRagCoordinator {
       'embedModelPath': embedModelPath,
       'genModelPath': genModelPath,
       'embedContextSize': embedNCtx,
-      'genContextSize': genConfig.nCtxDefault,
-      'batchSize': genConfig.nBatchDefault,
-      'numberOfThreads': genConfig.nThreadsDefault,
-      'numberOfThreadsBatch': genConfig.numberOfThreadsBatchDefault,
-      'microBatchSize': genConfig.microBatchSizeDefault,
-      'maxParallelSequences': genConfig.maxParallelSequencesDefault,
-      'chatTemplate': genConfig.chatTemplate,
-      'loras': genConfig.lorasDefault
-          .map((l) => {'path': l.path, 'scale': l.scale})
-          .toList(),
-      'maxTokens': genConfig.nPredictDefault,
-      'temp': genConfig.tempDefault,
-      'topK': genConfig.topKDefault,
-      'topP': genConfig.topPDefault,
-      'minP': genConfig.minPDefault,
-      'penalty': genConfig.penaltyRepeatDefault,
-      'seed': genConfig.seed,
-      'stopSequences': genConfig.stopSequencesDefault,
-      'grammar': genConfig.grammar,
-      'grammarLazy': genConfig.grammarLazyDefault,
-      'grammarTriggers': genConfig.grammarTriggersDefault
-          .map(
-            (t) => {
-              'type': t.type,
-              'value': t.value,
-              if (t.token != null) 'token': t.token,
-            },
-          )
-          .toList(),
-      'preservedTokens': genConfig.preservedTokensDefault,
-      'grammarRoot': genConfig.grammarRootDefault,
-      'reusePromptPrefix': genConfig.reusePromptPrefixDefault,
-      'genGpuLayers': genConfig.nGpuLayersDefault,
-      'streamBatchTokenThreshold': genConfig.streamBatchTokenThresholdDefault,
-      'streamBatchByteThreshold': genConfig.streamBatchByteThresholdDefault,
-      'gpuBackend': genConfig.gpuBackendDefault.name,
+      'genConfig': genConfig,
       'sendPort': initPort.sendPort,
-    }, debugName: 'llmcpp_RagWorker');
+    }, debugName: 'mt_llmkit_RagWorker');
 
     final initMsg = await initPort.first as Map<String, dynamic>;
     initPort.close();

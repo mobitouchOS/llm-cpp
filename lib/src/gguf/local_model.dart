@@ -1,7 +1,8 @@
 // lib/src/gguf/local_model.dart
 
-import 'package:llamadart/llamadart.dart' show LlamaImageContent;
+import 'package:llamadart/llamadart.dart' show LlamaContentPart;
 
+import '../core/generation_overrides.dart';
 import '../core/llm_config.dart';
 import '../core/llm_interface.dart';
 import '../core/streaming_result.dart';
@@ -49,27 +50,51 @@ class LocalModel implements LlmInterface {
   }
 
   @override
-  Stream<String> sendPrompt(String prompt, {List<LlamaImageContent>? images}) {
+  Stream<String> sendPrompt(
+    String prompt, {
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
+  }) {
     _ensureInitialized();
-    return _model!.sendPrompt(prompt, images: images);
+    return _model!.sendPrompt(
+      prompt,
+      systemPrompt: systemPrompt,
+      attachments: attachments,
+      overrides: overrides,
+    );
   }
 
   @override
   Future<String> sendPromptComplete(
     String prompt, {
-    List<LlamaImageContent>? images,
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
   }) {
     _ensureInitialized();
-    return _model!.sendPromptComplete(prompt, images: images);
+    return _model!.sendPromptComplete(
+      prompt,
+      systemPrompt: systemPrompt,
+      attachments: attachments,
+      overrides: overrides,
+    );
   }
 
   @override
   Stream<StreamingChunk> sendPromptStream(
     String prompt, {
-    List<LlamaImageContent>? images,
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
   }) {
     _ensureInitialized();
-    return _model!.sendPromptStream(prompt, images: images);
+    return _model!.sendPromptStream(
+      prompt,
+      systemPrompt: systemPrompt,
+      attachments: attachments,
+      overrides: overrides,
+    );
   }
 
   @override

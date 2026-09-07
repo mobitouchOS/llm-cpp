@@ -7,6 +7,13 @@ class StreamingChunk {
   /// Text chunk
   final String text;
 
+  /// Reasoning text, for models that emit a thinking block.
+  ///
+  /// llamadart routes reasoning to its own channel, so it never appears in
+  /// [text]. A chunk carries one or the other. Set `enableThinking: false` in
+  /// [LlmConfig] to stop paying decode time for reasoning you do not show.
+  final String? thinking;
+
   /// Current performance metrics (calculated so far)
   final PerformanceMetrics? metrics;
 
@@ -25,6 +32,7 @@ class StreamingChunk {
 
   StreamingChunk({
     required this.text,
+    this.thinking,
     this.metrics,
     this.isFinal = false,
     this.finishReason,
@@ -32,7 +40,7 @@ class StreamingChunk {
 
   @override
   String toString() {
-    return 'StreamingChunk(text: "$text", metrics: $metrics, '
-        'isFinal: $isFinal, finishReason: $finishReason)';
+    return 'StreamingChunk(text: "$text", thinking: $thinking, '
+        'metrics: $metrics, isFinal: $isFinal, finishReason: $finishReason)';
   }
 }

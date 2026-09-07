@@ -1,5 +1,6 @@
-import 'package:llamadart/llamadart.dart' show LlamaImageContent;
+import 'package:llamadart/llamadart.dart' show LlamaContentPart;
 
+import 'generation_overrides.dart';
 import 'streaming_result.dart';
 
 abstract interface class LlmInterface {
@@ -7,25 +8,38 @@ abstract interface class LlmInterface {
 
   /// Sends a prompt and returns a stream of tokens.
   ///
-  /// Pass [images] to enable vision (requires the model to have been loaded
-  /// with a multimodal projector via `mmprojPath` in [LlmConfig]).
-  Stream<String> sendPrompt(String prompt, {List<LlamaImageContent>? images});
+  /// [systemPrompt] is passed as a real `system` message, so the model's chat
+  /// template can place it where it belongs instead of it being smuggled into
+  /// the user turn.
+  ///
+  /// [attachments] carries non-text content — [LlamaImageContent] for vision
+  /// (requires the model to have been loaded with a multimodal projector via
+  /// `mmprojPath` in [LlmConfig]) and [LlamaAudioContent] for audio-capable
+  /// models.
+  ///
+  /// [overrides] adjusts sampling for this request only.
+  Stream<String> sendPrompt(
+    String prompt, {
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
+  });
 
   /// Sends a prompt and waits for the complete response.
-  ///
-  /// Pass [images] to enable vision.
   Future<String> sendPromptComplete(
     String prompt, {
-    List<LlamaImageContent>? images,
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
   });
 
   /// Sends a prompt and returns a stream of [StreamingChunk] with live
   /// performance metrics. **Recommended** method for UI use.
-  ///
-  /// Pass [images] to enable vision.
   Stream<StreamingChunk> sendPromptStream(
     String prompt, {
-    List<LlamaImageContent>? images,
+    String? systemPrompt,
+    List<LlamaContentPart>? attachments,
+    GenerationOverrides? overrides,
   });
 
   /// Whether generation is currently in progress.
